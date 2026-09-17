@@ -1,0 +1,10 @@
+services:
+  deny-ip-toolkit:
+    build: .
+    environment:
+      SOURCE_URLS: "${SOURCE_URLS:?Set SOURCE_URLS to sources you are permitted to use}"
+      OUTPUT_FILE: /app/output/deny-ip-list.txt
+      HTTP_TIMEOUT: "${HTTP_TIMEOUT:-60}"
+    volumes:
+      - ./output:/app/output
+
