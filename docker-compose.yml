@@ -2,7 +2,8 @@ services:
   deny-ip-toolkit:
     build: .
     environment:
-      SOURCE_URLS: "${SOURCE_URLS:?Set SOURCE_URLS to sources you are permitted to use}"
+      SOURCE_URLS: "${SOURCE_URLS:-}"
+      SOURCES_FILE: "${SOURCES_FILE:-}"
       OUTPUT_FILE: /app/output/deny-ip-list.txt
       HTTP_TIMEOUT: "${HTTP_TIMEOUT:-60}"
       MAX_DOWNLOAD_BYTES: "${MAX_DOWNLOAD_BYTES:-52428800}"

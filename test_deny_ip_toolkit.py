@@ -1,3 +1,4 @@
+import hashlib
 import io
 import tempfile
 import unittest
@@ -8,8 +9,10 @@ from unittest import mock
 from deny_ip_toolkit import (
     SafeRedirectHandler,
     SourceError,
+    SourceSpec,
     __version__,
     candidate_files,
+    load_source_manifest,
     normalize,
     read_source,
     redact_source,
@@ -48,6 +51,83 @@ class DenyIpToolkitTests(unittest.TestCase):
                 output.read_text(encoding="utf-8"),
                 "1.1.1.1\n8.8.8.8\n2001:db8::1\n",
             )
+
+    def test_normalizes_and_preserves_ipv4_and_ipv6_cidrs(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            source = root / "networks.txt"
+            output = root / "out.txt"
+            source.write_text(
+                "192.0.2.99/24\n192.0.2.0/24\n192.0.2.1\n"
+                "2001:db8::1234/64\n2001:db8::/64\n",
+                encoding="utf-8",
+            )
+            self.assertEqual(normalize([str(source)], output), 3)
+            self.assertEqual(
+                output.read_text(encoding="utf-8"),
+                "192.0.2.0/24\n192.0.2.1\n2001:db8::/64\n",
+            )
+
+    def test_loads_complete_manifest_and_resolves_local_location(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            source = root / "list.txt"
+            source.write_text("1.1.1.1\n", encoding="utf-8")
+            digest = hashlib.sha256(source.read_bytes()).hexdigest()
+            manifest = root / "sources.toml"
+            manifest.write_text(
+                "version = 1\n"
+                "[[sources]]\n"
+                'location = "list.txt"\n'
+                'license = "CC0-1.0"\n'
+                'license_url = "https://creativecommons.org/publicdomain/zero/1.0/"\n'
+                f'sha256 = "{digest}"\n'
+                'allowed_use = "Redistribution permitted."\n',
+                encoding="utf-8",
+            )
+            specs = load_source_manifest(manifest)
+            self.assertEqual(specs[0].location, str(source.resolve()))
+            output = root / "out.txt"
+            self.assertEqual(normalize(specs, output), 1)
+            self.assertEqual(output.read_text(encoding="utf-8"), "1.1.1.1\n")
+
+    def test_rejects_incomplete_manifest_before_processing(self):
+        with tempfile.TemporaryDirectory() as folder:
+            manifest = Path(folder) / "sources.toml"
+            manifest.write_text(
+                'version = 1\n[[sources]]\nlocation = "list.txt"\n',
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(SourceError, "missing"):
+                load_source_manifest(manifest)
+
+    def test_rejects_manifest_with_invalid_checksum_format(self):
+        with tempfile.TemporaryDirectory() as folder:
+            manifest = Path(folder) / "sources.toml"
+            manifest.write_text(
+                "version = 1\n"
+                "[[sources]]\n"
+                'location = "list.txt"\n'
+                'license = "CC0-1.0"\n'
+                'license_url = "https://example.test/license"\n'
+                'sha256 = "not-a-digest"\n'
+                'allowed_use = "Permitted."\n',
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(SourceError, "invalid SHA-256"):
+                load_source_manifest(manifest)
+
+    def test_rejects_invalid_manifest_checksum(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            source = root / "list.txt"
+            output = root / "out.txt"
+            source.write_text("1.1.1.1\n", encoding="utf-8")
+            output.write_text("9.9.9.9\n", encoding="utf-8")
+            spec = SourceSpec(str(source), sha256="0" * 64)
+            with self.assertRaisesRegex(SourceError, "checksum mismatch"):
+                normalize([spec], output)
+            self.assertEqual(output.read_text(encoding="utf-8"), "9.9.9.9\n")
 
     def test_extracts_safe_zip(self):
         with tempfile.TemporaryDirectory() as folder:

@@ -1,6 +1,8 @@
 FROM python:3.13-alpine
 
 WORKDIR /app
+COPY requirements.txt /app/requirements.txt
+RUN pip install --no-cache-dir --requirement /app/requirements.txt
 COPY deny_ip_toolkit.py /app/deny_ip_toolkit.py
 
 RUN addgroup -S app && adduser -S -G app app \
@@ -9,4 +11,3 @@ RUN addgroup -S app && adduser -S -G app app \
 
 USER app
 ENTRYPOINT ["python3", "/app/deny_ip_toolkit.py"]
-

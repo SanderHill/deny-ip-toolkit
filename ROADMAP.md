@@ -14,8 +14,8 @@ risk reduction and user value, not by promised delivery dates.
 
 ## Next: improve interoperability and provenance
 
-- Support IPv4 and IPv6 CIDR networks.
-- Add a source manifest with license, checksum, and provenance metadata.
+- [x] Support IPv4 and IPv6 CIDR networks.
+- [x] Add a source manifest with license, checksum, and provenance metadata.
 - Add a configuration file for Docker and scheduled use.
 - Support Synology, ipset, nftables, CSV, and JSON output formats.
 - Produce a machine-readable run summary and content hashes.
