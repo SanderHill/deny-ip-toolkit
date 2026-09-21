@@ -1,6 +1,8 @@
 # Deny IP Toolkit
 
 [![GitHub release](https://img.shields.io/github/v/release/SanderHill/deny-ip-toolkit)](https://github.com/SanderHill/deny-ip-toolkit/releases)
+[![CI](https://github.com/SanderHill/deny-ip-toolkit/actions/workflows/ci.yml/badge.svg)](https://github.com/SanderHill/deny-ip-toolkit/actions/workflows/ci.yml)
+[![CodeQL](https://github.com/SanderHill/deny-ip-toolkit/actions/workflows/codeql.yml/badge.svg)](https://github.com/SanderHill/deny-ip-toolkit/actions/workflows/codeql.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-blue.svg)](https://www.python.org/)
 
@@ -70,6 +72,10 @@ personal-use-only, or redistribution-restricted lists to this repository.
 
 ```bash
 python3 -m unittest -v
+python3 -m pip install --requirement requirements-dev.txt
+ruff check .
+ruff format --check .
+bandit --recursive -ll deny_ip_toolkit.py
 ```
 
 The project is currently at version `0.1.0`. See the
