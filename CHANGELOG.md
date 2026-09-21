@@ -17,10 +17,14 @@ project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Default-deny protection for remote sources resolving to non-public networks,
   including redirect validation and an explicit trusted-network opt-in.
 - Redaction of URL credentials, query values, and fragments in download errors.
+- IPv4 and IPv6 CIDR parsing, canonicalization, deduplication, and deterministic
+  output without network expansion.
+- Versioned TOML source manifests with required licensing, allowed-use, and
+  SHA-256 integrity metadata.
 
 ### Planned
 
-- CIDR input support and additional output formats.
+- Additional output formats.
 
 ## [0.1.0] - 2026-09-21
 

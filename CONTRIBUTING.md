@@ -16,6 +16,7 @@ documentation-only IP ranges or small synthetic fixtures.
 Before submitting a change, run:
 
 ```bash
+python3 -m pip install --requirement requirements.txt
 python3 -m unittest -v
 python3 -m pip install --requirement requirements-dev.txt
 ruff check .

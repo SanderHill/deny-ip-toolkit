@@ -8,7 +8,8 @@
 
 A small, local-first tool for combining and normalizing IP blocklists. It reads
 local files or explicitly configured HTTP(S) sources, validates IPv4 and IPv6
-addresses, removes duplicates, and writes a deterministic list.
+addresses and CIDR networks, removes duplicates, and writes a deterministic
+list without expanding networks into individual addresses.
 
 The project does **not** ship, mirror, or automatically publish third-party
 blocklist data. Only use sources whose licence or terms allow your intended
@@ -32,6 +33,36 @@ https://example.org/list-b.txt' \
 OUTPUT_FILE=./output/deny-ip-list.txt \
 python3 deny_ip_toolkit.py
 ```
+
+CIDRs are preserved and normalized to their network address. For example,
+`192.0.2.99/24` becomes `192.0.2.0/24`.
+
+## Licensed source manifest
+
+For repeatable runs, copy `sources.example.toml` to a private configuration
+location and describe each permitted source:
+
+```toml
+version = 1
+
+[[sources]]
+location = "./my-permitted-list.txt"
+license = "CC0-1.0"
+license_url = "https://creativecommons.org/publicdomain/zero/1.0/"
+sha256 = "<64 lowercase hexadecimal characters>"
+allowed_use = "Redistribution and derived use permitted."
+```
+
+Run it with `python3 deny_ip_toolkit.py --sources-file ./sources.toml`, or set
+`SOURCES_FILE`. Relative local paths are resolved from the manifest directory.
+Every entry must contain all five metadata fields. The complete manifest is
+validated before source processing starts, and each downloaded or local file
+must match its SHA-256 checksum before it is parsed or extracted.
+Generate that value with `sha256sum FILE` on Linux or `shasum -a 256 FILE` on
+macOS.
+
+Direct `--source` and `SOURCE_URLS` inputs remain available for ad-hoc use, but
+they do not provide the manifest's provenance and integrity guarantees.
 
 ## Resource limits
 
@@ -79,10 +110,12 @@ This repository is licensed under MIT. That licence applies to the software,
 not to data processed with it. You are responsible for complying with the
 licence and terms of every input source. Do not commit private, paid,
 personal-use-only, or redistribution-restricted lists to this repository.
+Manifest metadata records those terms; it does not grant additional rights.
 
 ## Development
 
 ```bash
+python3 -m pip install --requirement requirements.txt
 python3 -m unittest -v
 python3 -m pip install --requirement requirements-dev.txt
 ruff check .

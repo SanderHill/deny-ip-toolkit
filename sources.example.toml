@@ -1,0 +1,8 @@
+version = 1
+
+[[sources]]
+location = "./examples/my-permitted-list.txt"
+license = "CC0-1.0"
+license_url = "https://creativecommons.org/publicdomain/zero/1.0/"
+sha256 = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+allowed_use = "Example only; replace with the terms that apply to your source."

@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import ipaddress
 import os
 import re
@@ -13,7 +14,13 @@ import tempfile
 import urllib.parse
 import urllib.request
 import zipfile
+from dataclasses import dataclass
 from pathlib import Path
+
+try:
+    import tomllib
+except ModuleNotFoundError:  # Python 3.10
+    import tomli as tomllib
 
 USER_AGENT = "deny-ip-toolkit/1.0"
 DEFAULT_TIMEOUT = 60
@@ -28,6 +35,15 @@ __version__ = "0.1.0"
 
 class SourceError(RuntimeError):
     """Raised when a configured input source cannot be processed safely."""
+
+
+@dataclass(frozen=True)
+class SourceSpec:
+    location: str
+    sha256: str | None = None
+    license: str | None = None
+    license_url: str | None = None
+    allowed_use: str | None = None
 
 
 class SafeRedirectHandler(urllib.request.HTTPRedirectHandler):
@@ -119,6 +135,73 @@ def source_name(source: str) -> str:
         name = Path(parsed.path).name
         return "download" if name in {"", ".", ".."} else name
     return Path(source).name
+
+
+def load_source_manifest(path: Path) -> list[SourceSpec]:
+    """Load and validate a versioned source manifest before any source is read."""
+    try:
+        with path.open("rb") as handle:
+            document = tomllib.load(handle)
+    except (OSError, tomllib.TOMLDecodeError) as exc:
+        raise SourceError(f"could not read source manifest {path}: {exc}") from exc
+    if document.get("version") != 1:
+        raise SourceError("source manifest version must be 1")
+    sources = document.get("sources")
+    if not isinstance(sources, list) or not sources:
+        raise SourceError("source manifest must contain at least one [[sources]] entry")
+
+    required = {"location", "license", "license_url", "sha256", "allowed_use"}
+    specs: list[SourceSpec] = []
+    for index, item in enumerate(sources, start=1):
+        if not isinstance(item, dict):
+            raise SourceError(f"source manifest entry {index} must be a table")
+        missing = sorted(required - item.keys())
+        if missing:
+            raise SourceError(
+                f"source manifest entry {index} is missing: {', '.join(missing)}"
+            )
+        if any(
+            not isinstance(item[field], str) or not item[field].strip()
+            for field in required
+        ):
+            raise SourceError(
+                f"source manifest entry {index} fields must be non-empty strings"
+            )
+        digest = item["sha256"].lower()
+        if not re.fullmatch(r"[0-9a-f]{64}", digest):
+            raise SourceError(f"source manifest entry {index} has an invalid SHA-256")
+        license_url = urllib.parse.urlsplit(item["license_url"])
+        if license_url.scheme not in {"http", "https"} or not license_url.hostname:
+            raise SourceError(
+                f"source manifest entry {index} has an invalid license_url"
+            )
+        location = item["location"]
+        location_url = urllib.parse.urlsplit(location)
+        if location_url.scheme not in {"", "http", "https"}:
+            raise SourceError(
+                f"source manifest entry {index} has an unsupported location scheme"
+            )
+        if not location_url.scheme:
+            location = str((path.parent / location).resolve())
+        specs.append(
+            SourceSpec(
+                location=location,
+                sha256=digest,
+                license=item["license"],
+                license_url=item["license_url"],
+                allowed_use=item["allowed_use"],
+            )
+        )
+    return specs
+
+
+def verify_sha256(path: Path, expected: str) -> None:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        while chunk := handle.read(COPY_CHUNK_BYTES):
+            digest.update(chunk)
+    if digest.hexdigest() != expected:
+        raise SourceError(f"source checksum mismatch: {path.name}")
 
 
 def read_source(
@@ -235,22 +318,45 @@ def candidate_files(
     return [path for path in extract_dir.rglob("*") if path.is_file()]
 
 
-def extract_addresses(
+def extract_entries(
     paths: list[Path],
-) -> set[ipaddress.IPv4Address | ipaddress.IPv6Address]:
-    addresses: set[ipaddress.IPv4Address | ipaddress.IPv6Address] = set()
+) -> set[
+    ipaddress.IPv4Address
+    | ipaddress.IPv6Address
+    | ipaddress.IPv4Network
+    | ipaddress.IPv6Network
+]:
+    entries: set[
+        ipaddress.IPv4Address
+        | ipaddress.IPv6Address
+        | ipaddress.IPv4Network
+        | ipaddress.IPv6Network
+    ] = set()
     for path in paths:
         text = path.read_text(encoding="utf-8-sig", errors="ignore")
-        for token in re.findall(r"(?<![\w.:])(?:[0-9A-Fa-f:.]+)(?![\w.:])", text):
+        for token in re.findall(
+            r"(?<![\w.:/])(?:[0-9A-Fa-f:.]+(?:/\d{1,3})?)(?![\w.:/])",
+            text,
+        ):
+            candidate = token.strip(".:") or token
             try:
-                addresses.add(ipaddress.ip_address(token.strip(".:") or token))
+                if "/" in candidate:
+                    entries.add(ipaddress.ip_network(candidate, strict=False))
+                else:
+                    entries.add(ipaddress.ip_address(candidate))
             except ValueError:
                 continue
-    return addresses
+    return entries
+
+
+def entry_sort_key(entry):
+    if isinstance(entry, (ipaddress.IPv4Network, ipaddress.IPv6Network)):
+        return (entry.version, int(entry.network_address), 0, entry.prefixlen)
+    return (entry.version, int(entry), 1, entry.max_prefixlen)
 
 
 def normalize(
-    sources: list[str],
+    sources: list[str | SourceSpec],
     output: Path,
     timeout: int = DEFAULT_TIMEOUT,
     max_download_bytes: int = DEFAULT_MAX_DOWNLOAD_BYTES,
@@ -262,17 +368,24 @@ def normalize(
 ) -> int:
     if not sources:
         raise SourceError("configure at least one source")
-    addresses: set[ipaddress.IPv4Address | ipaddress.IPv6Address] = set()
+    entries = set()
     with tempfile.TemporaryDirectory(prefix="deny-ip-toolkit-") as folder:
         workdir = Path(folder)
-        for index, source in enumerate(sources):
+        for index, configured_source in enumerate(sources):
+            spec = (
+                configured_source
+                if isinstance(configured_source, SourceSpec)
+                else SourceSpec(configured_source)
+            )
             downloaded = read_source(
-                source,
+                spec.location,
                 workdir,
                 timeout,
                 max_download_bytes,
                 allow_private_sources,
             )
+            if spec.sha256:
+                verify_sha256(downloaded, spec.sha256)
             paths = candidate_files(
                 downloaded,
                 workdir / f"source-{index}",
@@ -281,10 +394,12 @@ def normalize(
                 max_zip_total_bytes,
                 max_zip_compression_ratio,
             )
-            addresses.update(extract_addresses(paths))
-    if not addresses:
-        raise SourceError("configured sources contained no valid IP addresses")
-    ordered = sorted(addresses, key=lambda address: (address.version, int(address)))
+            entries.update(extract_entries(paths))
+    if not entries:
+        raise SourceError(
+            "configured sources contained no valid IP addresses or networks"
+        )
+    ordered = sorted(entries, key=entry_sort_key)
     output.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.NamedTemporaryFile(
         "w", encoding="utf-8", dir=output.parent, delete=False
@@ -304,12 +419,27 @@ def configured_sources(cli_sources: list[str]) -> list[str]:
     return [*cli_sources, *environment_sources]
 
 
+def configured_source_specs(
+    cli_sources: list[str], manifest_path: Path | None
+) -> list[str | SourceSpec]:
+    sources: list[str | SourceSpec] = configured_sources(cli_sources)
+    if manifest_path is not None:
+        sources.extend(load_source_manifest(manifest_path))
+    return sources
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--version", action="version", version=f"%(prog)s {__version__}"
     )
     parser.add_argument("--source", action="append", default=[])
+    parser.add_argument(
+        "--sources-file",
+        type=Path,
+        default=Path(os.environ["SOURCES_FILE"]) if os.getenv("SOURCES_FILE") else None,
+        help="versioned TOML manifest containing licensed source metadata",
+    )
     parser.add_argument(
         "--output",
         type=Path,
@@ -360,7 +490,7 @@ def main() -> int:
     args = parser.parse_args()
     try:
         count = normalize(
-            configured_sources(args.source),
+            configured_source_specs(args.source, args.sources_file),
             args.output,
             args.timeout,
             args.max_download_bytes,
