@@ -7,6 +7,7 @@ import argparse
 import ipaddress
 import os
 import re
+import socket
 import stat
 import tempfile
 import urllib.parse
@@ -29,6 +30,18 @@ class SourceError(RuntimeError):
     """Raised when a configured input source cannot be processed safely."""
 
 
+class SafeRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Apply the remote destination policy to every HTTP redirect."""
+
+    def __init__(self, allow_private_sources: bool):
+        super().__init__()
+        self.allow_private_sources = allow_private_sources
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        validate_remote_url(newurl, self.allow_private_sources)
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
 def positive_int(value: str) -> int:
     parsed = int(value)
     if parsed <= 0:
@@ -43,10 +56,68 @@ def positive_float(value: str) -> float:
     return parsed
 
 
+def environment_flag(name: str) -> bool:
+    return os.getenv(name, "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def redact_source(source: str) -> str:
+    """Remove credentials, query values, and fragments from a remote source URL."""
+    parsed = urllib.parse.urlsplit(source)
+    if parsed.scheme not in {"http", "https"}:
+        return source
+    hostname = parsed.hostname or "invalid-host"
+    if ":" in hostname:
+        hostname = f"[{hostname}]"
+    try:
+        port = parsed.port
+    except ValueError:
+        port = None
+    netloc = f"{hostname}:{port}" if port is not None else hostname
+    query = "redacted" if parsed.query else ""
+    return urllib.parse.urlunsplit((parsed.scheme, netloc, parsed.path, query, ""))
+
+
+def validate_remote_url(source: str, allow_private_sources: bool = False) -> None:
+    """Reject remote URLs that resolve outside globally reachable address space."""
+    parsed = urllib.parse.urlsplit(source)
+    safe_source = redact_source(source)
+    if parsed.scheme not in {"http", "https"}:
+        raise SourceError(
+            f"unsupported remote source scheme: {parsed.scheme or 'missing'}"
+        )
+    if not parsed.hostname:
+        raise SourceError(f"remote source has no hostname: {safe_source}")
+    try:
+        port = parsed.port or (443 if parsed.scheme == "https" else 80)
+    except ValueError as exc:
+        raise SourceError(f"remote source has an invalid port: {safe_source}") from exc
+    try:
+        results = socket.getaddrinfo(
+            parsed.hostname,
+            port,
+            family=socket.AF_UNSPEC,
+            type=socket.SOCK_STREAM,
+            proto=socket.IPPROTO_TCP,
+        )
+    except socket.gaierror as exc:
+        raise SourceError(f"could not resolve remote source: {safe_source}") from exc
+    if not results:
+        raise SourceError(f"remote source resolved to no addresses: {safe_source}")
+    if allow_private_sources:
+        return
+    addresses = {ipaddress.ip_address(result[4][0]) for result in results}
+    if any(not address.is_global for address in addresses):
+        raise SourceError(
+            f"remote source resolves to a non-public address: {safe_source}; "
+            "use --allow-private-sources only for trusted sources"
+        )
+
+
 def source_name(source: str) -> str:
     parsed = urllib.parse.urlparse(source)
     if parsed.scheme in {"http", "https"}:
-        return Path(parsed.path).name or "download"
+        name = Path(parsed.path).name
+        return "download" if name in {"", ".", ".."} else name
     return Path(source).name
 
 
@@ -55,16 +126,19 @@ def read_source(
     target_dir: Path,
     timeout: int,
     max_download_bytes: int = DEFAULT_MAX_DOWNLOAD_BYTES,
+    allow_private_sources: bool = False,
 ) -> Path:
     parsed = urllib.parse.urlparse(source)
     if parsed.scheme in {"http", "https"}:
+        validate_remote_url(source, allow_private_sources)
+        safe_source = redact_source(source)
         destination = target_dir / source_name(source)
-        request = urllib.request.Request(source, headers={"User-Agent": USER_AGENT})
         try:
-            # The parsed scheme is restricted to HTTP(S) immediately above.
-            with urllib.request.urlopen(  # nosec B310
-                request, timeout=timeout
-            ) as response:
+            request = urllib.request.Request(source, headers={"User-Agent": USER_AGENT})
+            opener = urllib.request.build_opener(
+                SafeRedirectHandler(allow_private_sources)
+            )
+            with opener.open(request, timeout=timeout) as response:
                 content_length = response.headers.get("Content-Length")
                 if content_length is not None:
                     try:
@@ -88,8 +162,10 @@ def read_source(
                                 f"remote source exceeds the {max_download_bytes}-byte download limit"
                             )
                         handle.write(chunk)
-        except OSError as exc:
-            raise SourceError(f"could not download {source}: {exc}") from exc
+        except (OSError, ValueError) as exc:
+            raise SourceError(
+                f"could not download {safe_source}: {type(exc).__name__}"
+            ) from exc
         return destination
     if parsed.scheme:
         raise SourceError(f"unsupported source scheme: {parsed.scheme}")
@@ -182,6 +258,7 @@ def normalize(
     max_zip_member_bytes: int = DEFAULT_MAX_ZIP_MEMBER_BYTES,
     max_zip_total_bytes: int = DEFAULT_MAX_ZIP_TOTAL_BYTES,
     max_zip_compression_ratio: float = DEFAULT_MAX_ZIP_COMPRESSION_RATIO,
+    allow_private_sources: bool = False,
 ) -> int:
     if not sources:
         raise SourceError("configure at least one source")
@@ -189,7 +266,13 @@ def normalize(
     with tempfile.TemporaryDirectory(prefix="deny-ip-toolkit-") as folder:
         workdir = Path(folder)
         for index, source in enumerate(sources):
-            downloaded = read_source(source, workdir, timeout, max_download_bytes)
+            downloaded = read_source(
+                source,
+                workdir,
+                timeout,
+                max_download_bytes,
+                allow_private_sources,
+            )
             paths = candidate_files(
                 downloaded,
                 workdir / f"source-{index}",
@@ -268,6 +351,12 @@ def main() -> int:
             )
         ),
     )
+    parser.add_argument(
+        "--allow-private-sources",
+        action="store_true",
+        default=environment_flag("ALLOW_PRIVATE_SOURCES"),
+        help="allow trusted sources on private, loopback, or link-local networks",
+    )
     args = parser.parse_args()
     try:
         count = normalize(
@@ -279,6 +368,7 @@ def main() -> int:
             args.max_zip_member_bytes,
             args.max_zip_total_bytes,
             args.max_zip_compression_ratio,
+            args.allow_private_sources,
         )
     except SourceError as exc:
         parser.error(str(exc))

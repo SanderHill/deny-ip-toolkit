@@ -14,10 +14,12 @@ project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   reads.
 - CI tests for Python 3.10 through 3.14, Ruff checks, Bandit scanning, CodeQL
   analysis, and automated dependency update checks.
+- Default-deny protection for remote sources resolving to non-public networks,
+  including redirect validation and an explicit trusted-network opt-in.
+- Redaction of URL credentials, query values, and fragments in download errors.
 
 ### Planned
 
-- Safer remote-source validation.
 - CIDR input support and additional output formats.
 
 ## [0.1.0] - 2026-09-21

@@ -8,8 +8,8 @@ risk reduction and user value, not by promised delivery dates.
 
 - [x] Stream downloads and enforce configurable size limits.
 - [x] Bound ZIP member count, expanded size, and compression ratio.
-- Redact credentials and query parameters from errors and logs.
-- Add opt-in controls for private-network and localhost sources.
+- [x] Redact credentials and query parameters from errors and logs.
+- [x] Add opt-in controls for private-network and localhost sources.
 - Test redirects, timeouts, malformed archives, and failure recovery.
 
 ## Next: improve interoperability and provenance
