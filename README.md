@@ -1,5 +1,9 @@
 # Deny IP Toolkit
 
+[![GitHub release](https://img.shields.io/github/v/release/SanderHill/deny-ip-toolkit)](https://github.com/SanderHill/deny-ip-toolkit/releases)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-blue.svg)](https://www.python.org/)
+
 A small, local-first tool for combining and normalizing IP blocklists. It reads
 local files or explicitly configured HTTP(S) sources, validates IPv4 and IPv6
 addresses, removes duplicates, and writes a deterministic list.
@@ -51,5 +55,6 @@ personal-use-only, or redistribution-restricted lists to this repository.
 python3 -m unittest -v
 ```
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) and [SECURITY.md](SECURITY.md).
-
+The project is currently at version `0.1.0`. See the
+[roadmap](ROADMAP.md), [changelog](CHANGELOG.md),
+[contribution guide](CONTRIBUTING.md), and [security policy](SECURITY.md).

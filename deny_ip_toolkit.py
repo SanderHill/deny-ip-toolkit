@@ -16,6 +16,7 @@ from pathlib import Path
 
 USER_AGENT = "deny-ip-toolkit/1.0"
 DEFAULT_TIMEOUT = 60
+__version__ = "0.1.0"
 
 
 class SourceError(RuntimeError):
@@ -106,6 +107,7 @@ def configured_sources(cli_sources: list[str]) -> list[str]:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     parser.add_argument("--source", action="append", default=[])
     parser.add_argument(
         "--output",
@@ -126,4 +128,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

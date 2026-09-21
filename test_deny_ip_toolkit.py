@@ -3,10 +3,13 @@ import unittest
 import zipfile
 from pathlib import Path
 
-from deny_ip_toolkit import SourceError, candidate_files, normalize
+from deny_ip_toolkit import SourceError, __version__, candidate_files, normalize
 
 
 class DenyIpToolkitTests(unittest.TestCase):
+    def test_version(self):
+        self.assertEqual(__version__, "0.1.0")
+
     def test_combines_sorts_and_deduplicates_local_sources(self):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
@@ -48,4 +51,3 @@ class DenyIpToolkitTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-

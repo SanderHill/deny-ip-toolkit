@@ -1,0 +1,52 @@
+name: Bug report
+description: Report reproducible incorrect behavior
+title: "[Bug]: "
+labels: ["bug", "triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Do not include credentials, private feed URLs, restricted data, or real
+        access logs. Report security vulnerabilities privately instead.
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: Run `python3 deny_ip_toolkit.py --version`.
+      placeholder: "0.1.0"
+    validations:
+      required: true
+  - type: textarea
+    id: description
+    attributes:
+      label: What happened?
+      description: Describe the observed and expected behavior.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Minimal reproduction
+      description: Use synthetic or documentation-only IP addresses.
+    validations:
+      required: true
+  - type: dropdown
+    id: environment
+    attributes:
+      label: Environment
+      options:
+        - Python CLI
+        - Docker
+        - Docker Compose
+        - Other
+    validations:
+      required: true
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Safety checks
+      options:
+        - label: I removed credentials, private URLs, restricted data, and personal information.
+          required: true
+        - label: This is not a security vulnerability.
+          required: true
