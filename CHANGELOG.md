@@ -12,6 +12,8 @@ project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   sizes, and compression ratios.
 - Streaming downloads and archive extraction to avoid unbounded in-memory
   reads.
+- CI tests for Python 3.10 through 3.14, Ruff checks, Bandit scanning, CodeQL
+  analysis, and automated dependency update checks.
 
 ### Planned
 

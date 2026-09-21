@@ -5,6 +5,6 @@ __pycache__/
 output/
 data/
 *.txt
+!requirements-dev.txt
 *.csv
 *.zip
-

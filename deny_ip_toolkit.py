@@ -14,7 +14,6 @@ import urllib.request
 import zipfile
 from pathlib import Path
 
-
 USER_AGENT = "deny-ip-toolkit/1.0"
 DEFAULT_TIMEOUT = 60
 DEFAULT_MAX_DOWNLOAD_BYTES = 50 * 1024 * 1024
@@ -62,13 +61,18 @@ def read_source(
         destination = target_dir / source_name(source)
         request = urllib.request.Request(source, headers={"User-Agent": USER_AGENT})
         try:
-            with urllib.request.urlopen(request, timeout=timeout) as response:
+            # The parsed scheme is restricted to HTTP(S) immediately above.
+            with urllib.request.urlopen(  # nosec B310
+                request, timeout=timeout
+            ) as response:
                 content_length = response.headers.get("Content-Length")
                 if content_length is not None:
                     try:
                         declared_size = int(content_length)
                     except ValueError as exc:
-                        raise SourceError("remote source has an invalid Content-Length") from exc
+                        raise SourceError(
+                            "remote source has an invalid Content-Length"
+                        ) from exc
                     if declared_size < 0:
                         raise SourceError("remote source has an invalid Content-Length")
                     if declared_size > max_download_bytes:
@@ -148,12 +152,16 @@ def candidate_files(
                 while chunk := source_handle.read(COPY_CHUNK_BYTES):
                     extracted += len(chunk)
                     if extracted > max_member_bytes or extracted > member.file_size:
-                        raise SourceError("ZIP member expanded beyond its declared size")
+                        raise SourceError(
+                            "ZIP member expanded beyond its declared size"
+                        )
                     target_handle.write(chunk)
     return [path for path in extract_dir.rglob("*") if path.is_file()]
 
 
-def extract_addresses(paths: list[Path]) -> set[ipaddress.IPv4Address | ipaddress.IPv6Address]:
+def extract_addresses(
+    paths: list[Path],
+) -> set[ipaddress.IPv4Address | ipaddress.IPv6Address]:
     addresses: set[ipaddress.IPv4Address | ipaddress.IPv6Address] = set()
     for path in paths:
         text = path.read_text(encoding="utf-8-sig", errors="ignore")
@@ -206,14 +214,18 @@ def normalize(
 
 def configured_sources(cli_sources: list[str]) -> list[str]:
     environment_sources = [
-        line.strip() for line in os.getenv("SOURCE_URLS", "").splitlines() if line.strip()
+        line.strip()
+        for line in os.getenv("SOURCE_URLS", "").splitlines()
+        if line.strip()
     ]
     return [*cli_sources, *environment_sources]
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
+    parser.add_argument(
+        "--version", action="version", version=f"%(prog)s {__version__}"
+    )
     parser.add_argument("--source", action="append", default=[])
     parser.add_argument(
         "--output",
@@ -221,7 +233,9 @@ def main() -> int:
         default=Path(os.getenv("OUTPUT_FILE", "./output/deny-ip-list.txt")),
     )
     parser.add_argument(
-        "--timeout", type=int, default=int(os.getenv("HTTP_TIMEOUT", str(DEFAULT_TIMEOUT)))
+        "--timeout",
+        type=int,
+        default=int(os.getenv("HTTP_TIMEOUT", str(DEFAULT_TIMEOUT))),
     )
     parser.add_argument(
         "--max-download-bytes",
@@ -236,7 +250,9 @@ def main() -> int:
     parser.add_argument(
         "--max-zip-member-bytes",
         type=positive_int,
-        default=int(os.getenv("MAX_ZIP_MEMBER_BYTES", str(DEFAULT_MAX_ZIP_MEMBER_BYTES))),
+        default=int(
+            os.getenv("MAX_ZIP_MEMBER_BYTES", str(DEFAULT_MAX_ZIP_MEMBER_BYTES))
+        ),
     )
     parser.add_argument(
         "--max-zip-total-bytes",

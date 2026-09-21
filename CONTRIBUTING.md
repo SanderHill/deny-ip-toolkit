@@ -17,7 +17,14 @@ Before submitting a change, run:
 
 ```bash
 python3 -m unittest -v
+python3 -m pip install --requirement requirements-dev.txt
+ruff check .
+ruff format --check .
+bandit --recursive -ll deny_ip_toolkit.py
 ```
+
+CI runs the tests on every supported Python version (3.10 through 3.14).
+CodeQL analyzes pushes, pull requests, and the default branch weekly.
 
 Pull requests should include tests for changed behavior and update the README or
 changelog when users need to know about the change. Maintainers may request

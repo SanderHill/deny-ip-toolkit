@@ -22,8 +22,8 @@ risk reduction and user value, not by promised delivery dates.
 
 ## Later: maintenance automation
 
-- Add continuous integration across supported Python versions.
-- Add static analysis, dependency review, and security scanning.
+- [x] Add continuous integration across supported Python versions.
+- [x] Add static analysis, dependency updates, and security scanning.
 - Publish versioned container images and reproducible release artifacts.
 - Add conditional downloads using ETag and Last-Modified metadata.
 
