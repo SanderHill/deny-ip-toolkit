@@ -50,6 +50,18 @@ environment variables use the same uppercase names, for example
 `MAX_DOWNLOAD_BYTES=10485760`. If an input violates a limit, the run fails
 before replacing an existing output file.
 
+## Remote-source safety
+
+Every remote hostname is resolved before download. By default, the tool rejects
+destinations that are not globally reachable, including loopback, private,
+link-local, shared, reserved, and unspecified addresses. Redirect targets are
+checked using the same policy. Credentials, query values, and fragments are
+removed from error messages so signed URLs and tokens are not exposed.
+
+For an intentionally trusted source on an internal network, use
+`--allow-private-sources` or set `ALLOW_PRIVATE_SOURCES=true`. This opt-in
+weakens SSRF protection and should not be used with untrusted source URLs.
+
 ## Docker
 
 Copy `.env.example` to `.env`, configure sources you are permitted to use, and
