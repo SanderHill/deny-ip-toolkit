@@ -5,6 +5,10 @@ services:
       SOURCE_URLS: "${SOURCE_URLS:?Set SOURCE_URLS to sources you are permitted to use}"
       OUTPUT_FILE: /app/output/deny-ip-list.txt
       HTTP_TIMEOUT: "${HTTP_TIMEOUT:-60}"
+      MAX_DOWNLOAD_BYTES: "${MAX_DOWNLOAD_BYTES:-52428800}"
+      MAX_ZIP_MEMBERS: "${MAX_ZIP_MEMBERS:-1000}"
+      MAX_ZIP_MEMBER_BYTES: "${MAX_ZIP_MEMBER_BYTES:-26214400}"
+      MAX_ZIP_TOTAL_BYTES: "${MAX_ZIP_TOTAL_BYTES:-104857600}"
+      MAX_ZIP_COMPRESSION_RATIO: "${MAX_ZIP_COMPRESSION_RATIO:-100}"
     volumes:
       - ./output:/app/output
-

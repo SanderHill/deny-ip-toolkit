@@ -6,9 +6,15 @@ project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- Configurable limits for remote downloads, ZIP members, expanded archive
+  sizes, and compression ratios.
+- Streaming downloads and archive extraction to avoid unbounded in-memory
+  reads.
+
 ### Planned
 
-- Bounded downloads and ZIP extraction.
 - Safer remote-source validation.
 - CIDR input support and additional output formats.
 
