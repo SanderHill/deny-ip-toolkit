@@ -6,8 +6,8 @@ risk reduction and user value, not by promised delivery dates.
 
 ## Now: harden untrusted input
 
-- Stream downloads and enforce configurable size limits.
-- Bound ZIP member count, expanded size, and compression ratio.
+- [x] Stream downloads and enforce configurable size limits.
+- [x] Bound ZIP member count, expanded size, and compression ratio.
 - Redact credentials and query parameters from errors and logs.
 - Add opt-in controls for private-network and localhost sources.
 - Test redirects, timeouts, malformed archives, and failure recovery.

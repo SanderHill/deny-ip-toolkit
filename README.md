@@ -31,6 +31,23 @@ OUTPUT_FILE=./output/deny-ip-list.txt \
 python3 deny_ip_toolkit.py
 ```
 
+## Resource limits
+
+Remote and archived inputs are treated as untrusted. The default limits are:
+
+- 50 MiB per remote download;
+- 1,000 files per ZIP archive;
+- 25 MiB per expanded ZIP member;
+- 100 MiB expanded data per ZIP archive; and
+- a maximum ZIP compression ratio of 100:1 per member.
+
+The command-line options `--max-download-bytes`, `--max-zip-members`,
+`--max-zip-member-bytes`, `--max-zip-total-bytes`, and
+`--max-zip-compression-ratio` override these defaults. The equivalent Docker
+environment variables use the same uppercase names, for example
+`MAX_DOWNLOAD_BYTES=10485760`. If an input violates a limit, the run fails
+before replacing an existing output file.
+
 ## Docker
 
 Copy `.env.example` to `.env`, configure sources you are permitted to use, and
