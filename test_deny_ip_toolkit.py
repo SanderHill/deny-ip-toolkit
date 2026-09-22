@@ -29,6 +29,18 @@ class FakeResponse(io.BytesIO):
             self.headers["Content-Length"] = content_length
 
 
+class InterruptedResponse(FakeResponse):
+    def __init__(self, data: bytes):
+        super().__init__(data)
+        self.read_count = 0
+
+    def read(self, size=-1):
+        self.read_count += 1
+        if self.read_count > 1:
+            raise OSError("connection interrupted")
+        return super().read(min(size, 4))
+
+
 class DenyIpToolkitTests(unittest.TestCase):
     @staticmethod
     def resolution(address: str, port: int = 443):
@@ -245,6 +257,87 @@ class DenyIpToolkitTests(unittest.TestCase):
                 )
         validate.assert_called_once_with("https://redirect.example/list.txt", False)
 
+    def test_redirect_to_private_destination_is_rejected(self):
+        class RedirectingOpener:
+            def __init__(self, handler):
+                self.handler = handler
+
+            def open(self, request, timeout):
+                return self.handler.redirect_request(
+                    request,
+                    mock.Mock(),
+                    302,
+                    "Found",
+                    {},
+                    "https://private.example.test/list.txt",
+                )
+
+        def resolve(host, *args, **kwargs):
+            address = "127.0.0.1" if host == "private.example.test" else "93.184.216.34"
+            return self.resolution(address)
+
+        with tempfile.TemporaryDirectory() as folder:
+            output = Path(folder) / "out.txt"
+            output.write_text("9.9.9.9\n", encoding="utf-8")
+            with (
+                mock.patch("socket.getaddrinfo", side_effect=resolve),
+                mock.patch(
+                    "urllib.request.build_opener",
+                    side_effect=lambda handler: RedirectingOpener(handler),
+                ),
+            ):
+                with self.assertRaisesRegex(SourceError, "non-public address"):
+                    normalize(["https://example.test/list.txt"], output, timeout=1)
+            self.assertEqual(output.read_text(encoding="utf-8"), "9.9.9.9\n")
+
+    def test_timeout_preserves_existing_output_and_redacts_url(self):
+        source = "https://user:password@example.test/list.txt?token=secret"
+        output_contents = "9.9.9.9\n"
+        opener = mock.Mock()
+        opener.open.side_effect = TimeoutError("token=secret")
+        with tempfile.TemporaryDirectory() as folder:
+            output = Path(folder) / "out.txt"
+            output.write_text(output_contents, encoding="utf-8")
+            with (
+                mock.patch("deny_ip_toolkit.validate_remote_url"),
+                mock.patch("urllib.request.build_opener", return_value=opener),
+            ):
+                with self.assertRaises(SourceError) as raised:
+                    normalize([source], output, timeout=1)
+            self.assertEqual(output.read_text(encoding="utf-8"), output_contents)
+        message = str(raised.exception)
+        self.assertIn("https://example.test/list.txt?redacted", message)
+        self.assertNotIn("password", message)
+        self.assertNotIn("token=secret", message)
+
+    def test_interrupted_download_preserves_existing_output(self):
+        opener = mock.Mock()
+        opener.open.return_value = InterruptedResponse(b"1.1.1.1\n")
+        with tempfile.TemporaryDirectory() as folder:
+            output = Path(folder) / "out.txt"
+            output.write_text("9.9.9.9\n", encoding="utf-8")
+            with (
+                mock.patch("deny_ip_toolkit.validate_remote_url"),
+                mock.patch("urllib.request.build_opener", return_value=opener),
+            ):
+                with self.assertRaisesRegex(SourceError, "could not download"):
+                    normalize(["https://example.test/list.txt"], output, timeout=1)
+            self.assertEqual(output.read_text(encoding="utf-8"), "9.9.9.9\n")
+
+    def test_rejects_incomplete_content_length(self):
+        opener = mock.Mock()
+        opener.open.return_value = FakeResponse(b"1.1.1.1\n", content_length="100")
+        with tempfile.TemporaryDirectory() as folder:
+            output = Path(folder) / "out.txt"
+            output.write_text("9.9.9.9\n", encoding="utf-8")
+            with (
+                mock.patch("deny_ip_toolkit.validate_remote_url"),
+                mock.patch("urllib.request.build_opener", return_value=opener),
+            ):
+                with self.assertRaisesRegex(SourceError, "Content-Length"):
+                    normalize(["https://example.test/list.txt"], output, timeout=1)
+            self.assertEqual(output.read_text(encoding="utf-8"), "9.9.9.9\n")
+
     def test_download_error_does_not_expose_url_secrets(self):
         source = "https://user:password@example.test/list.txt?token=secret"
         opener = mock.Mock()
@@ -296,6 +389,59 @@ class DenyIpToolkitTests(unittest.TestCase):
                     max_total_bytes=20_000,
                     max_compression_ratio=2,
                 )
+
+    def test_rejects_corrupt_zip_and_preserves_existing_output(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            archive = root / "source.zip"
+            output = root / "out.txt"
+            archive.write_bytes(b"PK\x03\x04truncated")
+            output.write_text("9.9.9.9\n", encoding="utf-8")
+            with self.assertRaisesRegex(SourceError, "not a valid ZIP"):
+                normalize([str(archive)], output)
+            self.assertEqual(output.read_text(encoding="utf-8"), "9.9.9.9\n")
+
+    def test_rejects_encrypted_zip_member(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            archive = root / "source.zip"
+            with zipfile.ZipFile(archive, "w") as zipped:
+                zipped.writestr("list.txt", "1.1.1.1\n")
+            data = bytearray(archive.read_bytes())
+            for signature, flag_offset in ((b"PK\x03\x04", 6), (b"PK\x01\x02", 8)):
+                position = data.index(signature)
+                flags = int.from_bytes(
+                    data[position + flag_offset : position + flag_offset + 2],
+                    "little",
+                )
+                data[position + flag_offset : position + flag_offset + 2] = (
+                    flags | 0x1
+                ).to_bytes(2, "little")
+            archive.write_bytes(data)
+            output = root / "out.txt"
+            output.write_text("9.9.9.9\n", encoding="utf-8")
+            with self.assertRaisesRegex(SourceError, "encrypted member"):
+                normalize([str(archive)], output)
+            self.assertEqual(output.read_text(encoding="utf-8"), "9.9.9.9\n")
+
+    def test_local_read_failure_preserves_existing_output(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            source = root / "source.txt"
+            output = root / "out.txt"
+            source.write_text("1.1.1.1\n", encoding="utf-8")
+            output.write_text("9.9.9.9\n", encoding="utf-8")
+            original_read_text = Path.read_text
+
+            def fail_source_read(path, *args, **kwargs):
+                if path == source:
+                    raise OSError("read failed")
+                return original_read_text(path, *args, **kwargs)
+
+            with mock.patch.object(Path, "read_text", fail_source_read):
+                with self.assertRaisesRegex(SourceError, "could not read source file"):
+                    normalize([str(source)], output)
+            self.assertEqual(original_read_text(output), "9.9.9.9\n")
 
     def test_limit_failure_preserves_existing_output(self):
         with tempfile.TemporaryDirectory() as folder:
