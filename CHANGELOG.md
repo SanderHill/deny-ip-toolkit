@@ -21,6 +21,15 @@ project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   output without network expansion.
 - Versioned TOML source manifests with required licensing, allowed-use, and
   SHA-256 integrity metadata.
+- Failure and recovery coverage for timeouts, interrupted downloads, blocked
+  redirects, malformed or encrypted ZIP archives, and local read failures.
+
+### Fixed
+
+- Reject truncated downloads whose body does not match the declared
+  `Content-Length`.
+- Reject corrupt `.zip` sources instead of treating them as plain text, and
+  report local source and archive read failures consistently.
 
 ### Planned
 

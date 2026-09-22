@@ -197,9 +197,12 @@ def load_source_manifest(path: Path) -> list[SourceSpec]:
 
 def verify_sha256(path: Path, expected: str) -> None:
     digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        while chunk := handle.read(COPY_CHUNK_BYTES):
-            digest.update(chunk)
+    try:
+        with path.open("rb") as handle:
+            while chunk := handle.read(COPY_CHUNK_BYTES):
+                digest.update(chunk)
+    except OSError as exc:
+        raise SourceError(f"could not read source file: {path.name}") from exc
     if digest.hexdigest() != expected:
         raise SourceError(f"source checksum mismatch: {path.name}")
 
@@ -222,6 +225,7 @@ def read_source(
                 SafeRedirectHandler(allow_private_sources)
             )
             with opener.open(request, timeout=timeout) as response:
+                declared_size = None
                 content_length = response.headers.get("Content-Length")
                 if content_length is not None:
                     try:
@@ -245,6 +249,10 @@ def read_source(
                                 f"remote source exceeds the {max_download_bytes}-byte download limit"
                             )
                         handle.write(chunk)
+                if declared_size is not None and downloaded != declared_size:
+                    raise SourceError(
+                        "remote source size does not match Content-Length"
+                    )
         except (OSError, ValueError) as exc:
             raise SourceError(
                 f"could not download {safe_source}: {type(exc).__name__}"
@@ -266,55 +274,67 @@ def candidate_files(
     max_total_bytes: int = DEFAULT_MAX_ZIP_TOTAL_BYTES,
     max_compression_ratio: float = DEFAULT_MAX_ZIP_COMPRESSION_RATIO,
 ) -> list[Path]:
-    if not zipfile.is_zipfile(source):
+    try:
+        is_archive = zipfile.is_zipfile(source)
+    except OSError as exc:
+        raise SourceError(f"could not read source file: {source.name}") from exc
+    if not is_archive:
+        if source.suffix.lower() == ".zip":
+            raise SourceError("source is not a valid ZIP archive")
         return [source]
     extract_dir.mkdir(parents=True, exist_ok=True)
     root = extract_dir.resolve()
-    with zipfile.ZipFile(source) as archive:
-        members = [member for member in archive.infolist() if not member.is_dir()]
-        if len(members) > max_members:
-            raise SourceError(f"ZIP exceeds the {max_members}-member limit")
-        total_size = 0
-        for member in members:
-            target = (extract_dir / member.filename).resolve()
-            if target != root and root not in target.parents:
-                raise SourceError("ZIP contains an unsafe path")
-            if stat.S_ISLNK(member.external_attr >> 16):
-                raise SourceError("ZIP contains a symbolic link")
-            if member.flag_bits & 0x1:
-                raise SourceError("ZIP contains an encrypted member")
-            if member.file_size > max_member_bytes:
-                raise SourceError(
-                    f"ZIP member exceeds the {max_member_bytes}-byte limit"
-                )
-            total_size += member.file_size
-            if total_size > max_total_bytes:
-                raise SourceError(
-                    f"ZIP exceeds the {max_total_bytes}-byte expanded-size limit"
-                )
-            if member.file_size and member.compress_size == 0:
-                raise SourceError("ZIP member has an invalid compression ratio")
-            ratio = member.file_size / max(member.compress_size, 1)
-            if ratio > max_compression_ratio:
-                raise SourceError(
-                    f"ZIP member exceeds the {max_compression_ratio:g}:1 compression-ratio limit"
-                )
+    try:
+        with zipfile.ZipFile(source) as archive:
+            members = [member for member in archive.infolist() if not member.is_dir()]
+            if len(members) > max_members:
+                raise SourceError(f"ZIP exceeds the {max_members}-member limit")
+            total_size = 0
+            for member in members:
+                target = (extract_dir / member.filename).resolve()
+                if target != root and root not in target.parents:
+                    raise SourceError("ZIP contains an unsafe path")
+                if stat.S_ISLNK(member.external_attr >> 16):
+                    raise SourceError("ZIP contains a symbolic link")
+                if member.flag_bits & 0x1:
+                    raise SourceError("ZIP contains an encrypted member")
+                if member.file_size > max_member_bytes:
+                    raise SourceError(
+                        f"ZIP member exceeds the {max_member_bytes}-byte limit"
+                    )
+                total_size += member.file_size
+                if total_size > max_total_bytes:
+                    raise SourceError(
+                        f"ZIP exceeds the {max_total_bytes}-byte expanded-size limit"
+                    )
+                if member.file_size and member.compress_size == 0:
+                    raise SourceError("ZIP member has an invalid compression ratio")
+                ratio = member.file_size / max(member.compress_size, 1)
+                if ratio > max_compression_ratio:
+                    raise SourceError(
+                        "ZIP member exceeds the "
+                        f"{max_compression_ratio:g}:1 compression-ratio limit"
+                    )
 
-        for member in members:
-            target = (extract_dir / member.filename).resolve()
-            target.parent.mkdir(parents=True, exist_ok=True)
-            extracted = 0
-            with (
-                archive.open(member) as source_handle,
-                target.open("wb") as target_handle,
-            ):
-                while chunk := source_handle.read(COPY_CHUNK_BYTES):
-                    extracted += len(chunk)
-                    if extracted > max_member_bytes or extracted > member.file_size:
-                        raise SourceError(
-                            "ZIP member expanded beyond its declared size"
-                        )
-                    target_handle.write(chunk)
+            for member in members:
+                target = (extract_dir / member.filename).resolve()
+                target.parent.mkdir(parents=True, exist_ok=True)
+                extracted = 0
+                with (
+                    archive.open(member) as source_handle,
+                    target.open("wb") as target_handle,
+                ):
+                    while chunk := source_handle.read(COPY_CHUNK_BYTES):
+                        extracted += len(chunk)
+                        if extracted > max_member_bytes or extracted > member.file_size:
+                            raise SourceError(
+                                "ZIP member expanded beyond its declared size"
+                            )
+                        target_handle.write(chunk)
+    except SourceError:
+        raise
+    except (OSError, zipfile.BadZipFile, RuntimeError) as exc:
+        raise SourceError(f"could not read ZIP archive: {type(exc).__name__}") from exc
     return [path for path in extract_dir.rglob("*") if path.is_file()]
 
 
@@ -333,7 +353,10 @@ def extract_entries(
         | ipaddress.IPv6Network
     ] = set()
     for path in paths:
-        text = path.read_text(encoding="utf-8-sig", errors="ignore")
+        try:
+            text = path.read_text(encoding="utf-8-sig", errors="ignore")
+        except OSError as exc:
+            raise SourceError(f"could not read source file: {path.name}") from exc
         for token in re.findall(
             r"(?<![\w.:/])(?:[0-9A-Fa-f:.]+(?:/\d{1,3})?)(?![\w.:/])",
             text,
