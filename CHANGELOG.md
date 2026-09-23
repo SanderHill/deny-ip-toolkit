@@ -23,6 +23,9 @@ project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   SHA-256 integrity metadata.
 - Failure and recovery coverage for timeouts, interrupted downloads, blocked
   redirects, malformed or encrypted ZIP archives, and local read failures.
+- Provenance-aware overlap reports and explicit modes for retaining CIDR ranges
+  or their listed individual IP addresses, configurable through TOML, the CLI,
+  or the environment.
 
 ### Fixed
 

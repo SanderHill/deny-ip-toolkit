@@ -4,6 +4,7 @@ __pycache__/
 .DS_Store
 output/
 data/
+config/
 sources.toml
 *.txt
 !requirements-dev.txt
