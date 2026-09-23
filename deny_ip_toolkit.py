@@ -4,17 +4,21 @@
 from __future__ import annotations
 
 import argparse
+import bisect
 import hashlib
+import heapq
 import ipaddress
 import os
 import re
 import socket
 import stat
+import sys
 import tempfile
 import urllib.parse
 import urllib.request
 import zipfile
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from io import TextIOBase
 from pathlib import Path
 
 try:
@@ -30,7 +34,12 @@ DEFAULT_MAX_ZIP_MEMBER_BYTES = 25 * 1024 * 1024
 DEFAULT_MAX_ZIP_TOTAL_BYTES = 100 * 1024 * 1024
 DEFAULT_MAX_ZIP_COMPRESSION_RATIO = 100.0
 COPY_CHUNK_BYTES = 64 * 1024
+OVERLAP_ACTIONS = {"find", "remove_single_ips", "remove_ranges"}
 __version__ = "0.1.0"
+
+IPAddress = ipaddress.IPv4Address | ipaddress.IPv6Address
+IPNetwork = ipaddress.IPv4Network | ipaddress.IPv6Network
+IPEntry = IPAddress | IPNetwork
 
 
 class SourceError(RuntimeError):
@@ -44,6 +53,27 @@ class SourceSpec:
     license: str | None = None
     license_url: str | None = None
     allowed_use: str | None = None
+
+
+@dataclass(frozen=True)
+class ProcessingConfig:
+    overlap_action: str = "find"
+
+
+@dataclass(frozen=True)
+class EntryOccurrence:
+    entry: IPEntry
+    source: str
+    line: int
+
+
+@dataclass
+class OverlapReport:
+    occurrences: dict[IPEntry, list[EntryOccurrence]]
+    covered_addresses: dict[IPAddress, IPNetwork]
+    nested_networks: dict[IPNetwork, IPNetwork]
+    ranges_with_individual_ips: set[IPNetwork]
+    removed_entries: set[IPEntry] = field(default_factory=set)
 
 
 class SafeRedirectHandler(urllib.request.HTTPRedirectHandler):
@@ -195,6 +225,36 @@ def load_source_manifest(path: Path) -> list[SourceSpec]:
     return specs
 
 
+def validate_overlap_action(action: str) -> str:
+    if action not in OVERLAP_ACTIONS:
+        choices = ", ".join(sorted(OVERLAP_ACTIONS))
+        raise SourceError(f"overlap_action must be one of: {choices}")
+    return action
+
+
+def load_processing_config(path: Path) -> ProcessingConfig:
+    """Load the processing section of a versioned TOML configuration file."""
+    try:
+        with path.open("rb") as handle:
+            document = tomllib.load(handle)
+    except (OSError, tomllib.TOMLDecodeError) as exc:
+        raise SourceError(f"could not read configuration {path}: {exc}") from exc
+    if document.get("version") != 1:
+        raise SourceError("configuration version must be 1")
+    processing = document.get("processing", {})
+    if not isinstance(processing, dict):
+        raise SourceError("configuration processing section must be a table")
+    unknown = sorted(set(processing) - {"overlap_action"})
+    if unknown:
+        raise SourceError(
+            f"configuration processing section has unknown fields: {', '.join(unknown)}"
+        )
+    action = processing.get("overlap_action", "find")
+    if not isinstance(action, str):
+        raise SourceError("configuration overlap_action must be a string")
+    return ProcessingConfig(overlap_action=validate_overlap_action(action))
+
+
 def verify_sha256(path: Path, expected: str) -> None:
     digest = hashlib.sha256()
     try:
@@ -338,38 +398,171 @@ def candidate_files(
     return [path for path in extract_dir.rglob("*") if path.is_file()]
 
 
-def extract_entries(
-    paths: list[Path],
-) -> set[
-    ipaddress.IPv4Address
-    | ipaddress.IPv6Address
-    | ipaddress.IPv4Network
-    | ipaddress.IPv6Network
-]:
-    entries: set[
-        ipaddress.IPv4Address
-        | ipaddress.IPv6Address
-        | ipaddress.IPv4Network
-        | ipaddress.IPv6Network
-    ] = set()
+def extract_occurrences(
+    paths: list[Path], source_label: str | None = None
+) -> list[EntryOccurrence]:
+    occurrences: list[EntryOccurrence] = []
     for path in paths:
         try:
             text = path.read_text(encoding="utf-8-sig", errors="ignore")
         except OSError as exc:
             raise SourceError(f"could not read source file: {path.name}") from exc
-        for token in re.findall(
-            r"(?<![\w.:/])(?:[0-9A-Fa-f:.]+(?:/\d{1,3})?)(?![\w.:/])",
-            text,
-        ):
-            candidate = token.strip(".:") or token
-            try:
-                if "/" in candidate:
-                    entries.add(ipaddress.ip_network(candidate, strict=False))
-                else:
-                    entries.add(ipaddress.ip_address(candidate))
-            except ValueError:
-                continue
-    return entries
+        origin = source_label or str(path)
+        if len(paths) > 1:
+            origin = f"{origin}!{path.name}"
+        for line_number, line in enumerate(text.splitlines(), start=1):
+            for token in re.findall(
+                r"(?<![\w.:/])(?:[0-9A-Fa-f:.]+(?:/\d{1,3})?)(?![\w.:/])",
+                line,
+            ):
+                candidate = token.strip(".:") or token
+                try:
+                    entry: IPEntry
+                    if "/" in candidate:
+                        entry = ipaddress.ip_network(candidate, strict=False)
+                    else:
+                        entry = ipaddress.ip_address(candidate)
+                except ValueError:
+                    continue
+                occurrences.append(EntryOccurrence(entry, origin, line_number))
+    return occurrences
+
+
+def extract_entries(paths: list[Path]) -> set[IPEntry]:
+    return {occurrence.entry for occurrence in extract_occurrences(paths)}
+
+
+def analyze_overlaps(occurrences: list[EntryOccurrence]) -> OverlapReport:
+    grouped: dict[IPEntry, list[EntryOccurrence]] = {}
+    for occurrence in occurrences:
+        grouped.setdefault(occurrence.entry, []).append(occurrence)
+
+    addresses_by_version: dict[int, list[IPAddress]] = {4: [], 6: []}
+    networks_by_version: dict[int, list[IPNetwork]] = {4: [], 6: []}
+    for entry in grouped:
+        if isinstance(entry, (ipaddress.IPv4Network, ipaddress.IPv6Network)):
+            networks_by_version[entry.version].append(entry)
+        else:
+            addresses_by_version[entry.version].append(entry)
+
+    covered_addresses: dict[IPAddress, IPNetwork] = {}
+    nested_networks: dict[IPNetwork, IPNetwork] = {}
+    ranges_with_individual_ips: set[IPNetwork] = set()
+
+    for version in (4, 6):
+        addresses = sorted(addresses_by_version[version], key=int)
+        networks = sorted(
+            networks_by_version[version],
+            key=lambda network: (
+                int(network.network_address),
+                -int(network.broadcast_address),
+            ),
+        )
+
+        active: list[tuple[int, int, IPNetwork]] = []
+        network_index = 0
+        for address in addresses:
+            address_value = int(address)
+            while (
+                network_index < len(networks)
+                and int(networks[network_index].network_address) <= address_value
+            ):
+                network = networks[network_index]
+                heapq.heappush(
+                    active,
+                    (-int(network.broadcast_address), network.prefixlen, network),
+                )
+                network_index += 1
+            while active and -active[0][0] < address_value:
+                heapq.heappop(active)
+            if active:
+                covered_addresses[address] = active[0][2]
+
+        address_values = [int(address) for address in addresses]
+        for network in networks:
+            position = bisect.bisect_left(address_values, int(network.network_address))
+            if position < len(address_values) and address_values[position] <= int(
+                network.broadcast_address
+            ):
+                ranges_with_individual_ips.add(network)
+
+        stack: list[IPNetwork] = []
+        for network in networks:
+            while stack and int(stack[-1].broadcast_address) < int(
+                network.network_address
+            ):
+                stack.pop()
+            if stack and network.subnet_of(stack[-1]):
+                nested_networks[network] = stack[-1]
+            stack.append(network)
+
+    return OverlapReport(
+        occurrences=grouped,
+        covered_addresses=covered_addresses,
+        nested_networks=nested_networks,
+        ranges_with_individual_ips=ranges_with_individual_ips,
+    )
+
+
+def apply_overlap_action(
+    entries: set[IPEntry], report: OverlapReport, action: str
+) -> set[IPEntry]:
+    action = validate_overlap_action(action)
+    if action == "remove_single_ips":
+        report.removed_entries = set(report.covered_addresses)
+    elif action == "remove_ranges":
+        report.removed_entries = set(report.ranges_with_individual_ips)
+    else:
+        report.removed_entries = set()
+    return entries - report.removed_entries
+
+
+def occurrence_label(occurrence: EntryOccurrence) -> str:
+    return f"{occurrence.source}:{occurrence.line}"
+
+
+def write_overlap_report(
+    report: OverlapReport, action: str, stream: TextIOBase
+) -> None:
+    exact_groups = {
+        entry: locations
+        for entry, locations in report.occurrences.items()
+        if len(locations) > 1
+    }
+    exact_count = sum(len(locations) - 1 for locations in exact_groups.values())
+    stream.write("overlap analysis:\n")
+    stream.write(f"  exact duplicates: {exact_count}\n")
+    stream.write(f"  single IPs covered by ranges: {len(report.covered_addresses)}\n")
+    stream.write(f"  nested ranges: {len(report.nested_networks)}\n")
+    stream.write(f"  entries removed by {action}: {len(report.removed_entries)}\n")
+
+    for entry in sorted(exact_groups, key=entry_sort_key):
+        locations = ", ".join(occurrence_label(item) for item in exact_groups[entry])
+        stream.write(f"  exact duplicate {entry}: {locations}\n")
+    for address in sorted(report.covered_addresses, key=entry_sort_key):
+        network = report.covered_addresses[address]
+        address_location = occurrence_label(report.occurrences[address][0])
+        network_location = occurrence_label(report.occurrences[network][0])
+        stream.write(
+            f"  covered IP {address} ({address_location}) by "
+            f"{network} ({network_location})\n"
+        )
+    for network in sorted(report.nested_networks, key=entry_sort_key):
+        parent = report.nested_networks[network]
+        network_location = occurrence_label(report.occurrences[network][0])
+        parent_location = occurrence_label(report.occurrences[parent][0])
+        stream.write(
+            f"  nested range {network} ({network_location}) in "
+            f"{parent} ({parent_location})\n"
+        )
+    for entry in sorted(report.removed_entries, key=entry_sort_key):
+        entry_location = occurrence_label(report.occurrences[entry][0])
+        stream.write(f"  removed {entry} ({entry_location})\n")
+    if action == "remove_ranges":
+        stream.write(
+            "WARNING: remove_ranges can reduce the blocked address space; "
+            "unlisted addresses from removed ranges are no longer included.\n"
+        )
 
 
 def entry_sort_key(entry):
@@ -388,10 +581,13 @@ def normalize(
     max_zip_total_bytes: int = DEFAULT_MAX_ZIP_TOTAL_BYTES,
     max_zip_compression_ratio: float = DEFAULT_MAX_ZIP_COMPRESSION_RATIO,
     allow_private_sources: bool = False,
+    overlap_action: str = "find",
+    report_stream: TextIOBase | None = None,
 ) -> int:
     if not sources:
         raise SourceError("configure at least one source")
-    entries = set()
+    validate_overlap_action(overlap_action)
+    occurrences: list[EntryOccurrence] = []
     with tempfile.TemporaryDirectory(prefix="deny-ip-toolkit-") as folder:
         workdir = Path(folder)
         for index, configured_source in enumerate(sources):
@@ -417,11 +613,16 @@ def normalize(
                 max_zip_total_bytes,
                 max_zip_compression_ratio,
             )
-            entries.update(extract_entries(paths))
+            occurrences.extend(extract_occurrences(paths, redact_source(spec.location)))
+    entries = {occurrence.entry for occurrence in occurrences}
     if not entries:
         raise SourceError(
             "configured sources contained no valid IP addresses or networks"
         )
+    report = analyze_overlaps(occurrences)
+    entries = apply_overlap_action(entries, report, overlap_action)
+    if report_stream is not None:
+        write_overlap_report(report, overlap_action, report_stream)
     ordered = sorted(entries, key=entry_sort_key)
     output.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.NamedTemporaryFile(
@@ -451,7 +652,17 @@ def configured_source_specs(
     return sources
 
 
-def main() -> int:
+def configured_overlap_action(cli_action: str | None, config_path: Path | None) -> str:
+    configured = (
+        load_processing_config(config_path).overlap_action
+        if config_path is not None
+        else "find"
+    )
+    environment_action = os.getenv("OVERLAP_ACTION")
+    return validate_overlap_action(cli_action or environment_action or configured)
+
+
+def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--version", action="version", version=f"%(prog)s {__version__}"
@@ -462,6 +673,12 @@ def main() -> int:
         type=Path,
         default=Path(os.environ["SOURCES_FILE"]) if os.getenv("SOURCES_FILE") else None,
         help="versioned TOML manifest containing licensed source metadata",
+    )
+    parser.add_argument(
+        "--config-file",
+        type=Path,
+        default=Path(os.environ["CONFIG_FILE"]) if os.getenv("CONFIG_FILE") else None,
+        help="versioned TOML processing configuration",
     )
     parser.add_argument(
         "--output",
@@ -510,8 +727,38 @@ def main() -> int:
         default=environment_flag("ALLOW_PRIVATE_SOURCES"),
         help="allow trusted sources on private, loopback, or link-local networks",
     )
+    overlap_group = parser.add_mutually_exclusive_group()
+    overlap_group.add_argument(
+        "--find-duplicates",
+        dest="overlap_action",
+        action="store_const",
+        const="find",
+        help="report exact duplicates and overlaps without removing overlaps",
+    )
+    overlap_group.add_argument(
+        "--deduplicate-single-ips",
+        dest="overlap_action",
+        action="store_const",
+        const="remove_single_ips",
+        help="remove individual IPs covered by a retained CIDR range",
+    )
+    overlap_group.add_argument(
+        "--deduplicate-ranges",
+        dest="overlap_action",
+        action="store_const",
+        const="remove_ranges",
+        help="remove ranges containing explicit individual IPs",
+    )
+    return parser
+
+
+def main() -> int:
+    parser = build_parser()
     args = parser.parse_args()
     try:
+        overlap_action = configured_overlap_action(
+            args.overlap_action, args.config_file
+        )
         count = normalize(
             configured_source_specs(args.source, args.sources_file),
             args.output,
@@ -522,6 +769,8 @@ def main() -> int:
             args.max_zip_total_bytes,
             args.max_zip_compression_ratio,
             args.allow_private_sources,
+            overlap_action,
+            sys.stdout,
         )
     except SourceError as exc:
         parser.error(str(exc))

@@ -4,6 +4,8 @@ services:
     environment:
       SOURCE_URLS: "${SOURCE_URLS:-}"
       SOURCES_FILE: "${SOURCES_FILE:-}"
+      CONFIG_FILE: "${CONFIG_FILE:-}"
+      OVERLAP_ACTION: "${OVERLAP_ACTION:-find}"
       OUTPUT_FILE: /app/output/deny-ip-list.txt
       HTTP_TIMEOUT: "${HTTP_TIMEOUT:-60}"
       MAX_DOWNLOAD_BYTES: "${MAX_DOWNLOAD_BYTES:-52428800}"
@@ -14,3 +16,4 @@ services:
       ALLOW_PRIVATE_SOURCES: "${ALLOW_PRIVATE_SOURCES:-false}"
     volumes:
       - ./output:/app/output
+      - ./config:/app/config:ro

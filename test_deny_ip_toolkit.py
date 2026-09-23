@@ -1,5 +1,6 @@
 import hashlib
 import io
+import os
 import tempfile
 import unittest
 import zipfile
@@ -11,7 +12,10 @@ from deny_ip_toolkit import (
     SourceError,
     SourceSpec,
     __version__,
+    build_parser,
     candidate_files,
+    configured_overlap_action,
+    load_processing_config,
     load_source_manifest,
     normalize,
     read_source,
@@ -79,6 +83,133 @@ class DenyIpToolkitTests(unittest.TestCase):
                 output.read_text(encoding="utf-8"),
                 "192.0.2.0/24\n192.0.2.1\n2001:db8::/64\n",
             )
+
+    def test_find_duplicates_reports_provenance_without_removing_overlaps(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            first = root / "first.txt"
+            second = root / "second.txt"
+            output = root / "out.txt"
+            report = io.StringIO()
+            first.write_text("1.2.3.0/24\n1.2.3.4\n1.2.3.128/25\n", encoding="utf-8")
+            second.write_text("invalid\n1.2.3.4\n", encoding="utf-8")
+            self.assertEqual(
+                normalize(
+                    [str(first), str(second)],
+                    output,
+                    overlap_action="find",
+                    report_stream=report,
+                ),
+                3,
+            )
+            self.assertEqual(
+                output.read_text(encoding="utf-8"),
+                "1.2.3.0/24\n1.2.3.4\n1.2.3.128/25\n",
+            )
+            report_text = report.getvalue()
+            self.assertIn("exact duplicates: 1", report_text)
+            self.assertIn("single IPs covered by ranges: 1", report_text)
+            self.assertIn("nested ranges: 1", report_text)
+            self.assertIn(f"{first}:2", report_text)
+            self.assertIn(f"{second}:2", report_text)
+
+    def test_remove_single_ips_keeps_covering_ipv4_and_ipv6_ranges(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            source = root / "source.txt"
+            output = root / "out.txt"
+            source.write_text(
+                "1.2.3.0/24\n1.2.3.4\n8.8.8.8\n2001:db8::/64\n2001:db8::1\n",
+                encoding="utf-8",
+            )
+            self.assertEqual(
+                normalize([str(source)], output, overlap_action="remove_single_ips"),
+                3,
+            )
+            self.assertEqual(
+                output.read_text(encoding="utf-8"),
+                "1.2.3.0/24\n8.8.8.8\n2001:db8::/64\n",
+            )
+
+    def test_remove_ranges_keeps_explicit_ips_and_warns(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            source = root / "source.txt"
+            output = root / "out.txt"
+            report = io.StringIO()
+            source.write_text(
+                "1.2.3.0/24\n1.2.3.0/25\n1.2.3.4\n8.8.8.0/24\n",
+                encoding="utf-8",
+            )
+            self.assertEqual(
+                normalize(
+                    [str(source)],
+                    output,
+                    overlap_action="remove_ranges",
+                    report_stream=report,
+                ),
+                2,
+            )
+            self.assertEqual(
+                output.read_text(encoding="utf-8"),
+                "1.2.3.4\n8.8.8.0/24\n",
+            )
+            report_text = report.getvalue()
+            self.assertIn("removed 1.2.3.0/24", report_text)
+            self.assertIn("removed 1.2.3.0/25", report_text)
+            self.assertIn("WARNING: remove_ranges", report_text)
+
+    def test_loads_processing_overlap_action(self):
+        with tempfile.TemporaryDirectory() as folder:
+            config = Path(folder) / "config.toml"
+            config.write_text(
+                'version = 1\n[processing]\noverlap_action = "remove_single_ips"\n',
+                encoding="utf-8",
+            )
+            self.assertEqual(
+                load_processing_config(config).overlap_action,
+                "remove_single_ips",
+            )
+
+    def test_cli_and_environment_override_processing_config(self):
+        with tempfile.TemporaryDirectory() as folder:
+            config = Path(folder) / "config.toml"
+            config.write_text(
+                'version = 1\n[processing]\noverlap_action = "remove_single_ips"\n',
+                encoding="utf-8",
+            )
+            with mock.patch.dict(os.environ, {"OVERLAP_ACTION": "remove_ranges"}):
+                self.assertEqual(
+                    configured_overlap_action(None, config), "remove_ranges"
+                )
+                self.assertEqual(configured_overlap_action("find", config), "find")
+
+    def test_rejects_unknown_processing_overlap_action(self):
+        with tempfile.TemporaryDirectory() as folder:
+            config = Path(folder) / "config.toml"
+            config.write_text(
+                'version = 1\n[processing]\noverlap_action = "surprise"\n',
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(SourceError, "overlap_action"):
+                load_processing_config(config)
+
+    def test_cli_rejects_conflicting_overlap_actions(self):
+        parser = build_parser()
+        with mock.patch("sys.stderr", io.StringIO()):
+            with self.assertRaises(SystemExit):
+                parser.parse_args(["--find-duplicates", "--deduplicate-single-ips"])
+
+    def test_invalid_overlap_action_preserves_existing_output(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            source = root / "source.txt"
+            output = root / "out.txt"
+            source.write_text("1.2.3.4\n", encoding="utf-8")
+            output.write_text("9.9.9.9\n", encoding="utf-8")
+            with self.assertRaisesRegex(SourceError, "overlap_action"):
+                normalize([str(source)], output, overlap_action="surprise")
+            self.assertEqual(output.read_text(encoding="utf-8"), "9.9.9.9\n")
 
     def test_loads_complete_manifest_and_resolves_local_location(self):
         with tempfile.TemporaryDirectory() as folder:

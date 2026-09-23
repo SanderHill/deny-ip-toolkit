@@ -37,6 +37,47 @@ python3 deny_ip_toolkit.py
 CIDRs are preserved and normalized to their network address. For example,
 `192.0.2.99/24` becomes `192.0.2.0/24`.
 
+## Duplicate and overlap handling
+
+Exact duplicate entries are always reduced to one output entry. The tool also
+detects individual IP addresses covered by CIDR ranges and nested CIDR ranges.
+By default it reports those semantic overlaps without removing either entry:
+
+```bash
+python3 deny_ip_toolkit.py \
+  --source ./my-own-list.txt \
+  --find-duplicates
+```
+
+Every finding includes the source and line number where available. Choose one
+of two explicit deduplication modes when you want to change the output:
+
+- `--deduplicate-single-ips` removes individual IPs covered by a retained CIDR
+  range;
+- `--deduplicate-ranges` removes every CIDR range containing at least one
+  explicitly listed individual IP and retains the individual IPs.
+
+For input containing `1.2.3.0/24` and `1.2.3.4`, the first mode keeps only the
+range and the second keeps only the individual IP. Removing ranges can greatly
+reduce the blocked address space because other addresses from those ranges are
+not expanded or retained. The command prints a warning whenever that mode is
+selected. IPv4 and IPv6 are analyzed independently.
+
+For repeatable runs, copy `config.example.toml` to a private configuration
+location:
+
+```toml
+version = 1
+
+[processing]
+overlap_action = "find"
+```
+
+Select it with `--config-file ./config.toml` or `CONFIG_FILE`. Supported values
+are `find`, `remove_single_ips`, and `remove_ranges`. A CLI overlap option takes
+precedence over `OVERLAP_ACTION`, which takes precedence over the configuration
+file. Conflicting CLI options and unknown configuration values are rejected.
+
 ## Licensed source manifest
 
 For repeatable runs, copy `sources.example.toml` to a private configuration
@@ -96,7 +137,7 @@ weakens SSRF protection and should not be used with untrusted source URLs.
 ## Docker
 
 Copy `.env.example` to `.env`, configure sources you are permitted to use, and
-run:
+optionally copy `config.example.toml` to `config/config.toml`. Then run:
 
 ```bash
 docker compose up --build

@@ -16,6 +16,7 @@ risk reduction and user value, not by promised delivery dates.
 
 - [x] Support IPv4 and IPv6 CIDR networks.
 - [x] Add a source manifest with license, checksum, and provenance metadata.
+- [x] Add configurable overlap discovery and IP/range deduplication modes.
 - Add a configuration file for Docker and scheduled use.
 - Support Synology, ipset, nftables, CSV, and JSON output formats.
 - Produce a machine-readable run summary and content hashes.
