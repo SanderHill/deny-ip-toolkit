@@ -11,14 +11,14 @@ requires explicit consumer support.
 | status | string | success or failed in a saved report |
 | configured_sources | array of strings | Requested locations with URL secrets removed |
 | sources | array of objects | Sources completed through download/checksum verification |
-| settings | object | Effective overlap action, timeout, limits and private-source option |
+| settings | object | Effective overlap action, output format, timeout, limits and private-source option |
 | counts | object or null | Valid occurrence, unique entry, duplicate, covered IP, nested range, removed entry and output entry counts |
 | exact_duplicates | array | Repeated canonical entries with all occurrences |
 | covered_ips | array | Covered individual entries with a representative covering_range |
 | nested_ranges | array | Nested ranges with their immediate parent_range |
 | removed_entries | array | Entries removed by the selected overlap action |
 | warnings | array of strings | Policy warnings, including range removal |
-| output | object or null | Output path and SHA-256 of the exact UTF-8 output bytes |
+| output | object or null | Output path, format and SHA-256 of the exact UTF-8 output bytes |
 | error | object or null | Failure type and safe message |
 | comparison | object or null | Candidate comparison with previous output |
 
@@ -32,6 +32,10 @@ entries. IPv4 and IPv6 results are independent.
 Successful reports contain all finding arrays and counts; failed reports can
 omit finding arrays and have null counts/output if processing stopped early.
 An output hash describes file bytes, not the effective blocked address space.
+The additive `output.format` and `settings.output_format` fields identify the
+export format. Output entry counts describe selected canonical entries, not the
+number of firewall commands or collapsed nftables elements. JSON denylist exports
+have `kind: "denylist"` and an entries array; they are not run reports.
 Completed source metadata and partial analysis in failed reports are diagnostic.
 
 Reports use a temporary file in the destination directory and atomic replacement.

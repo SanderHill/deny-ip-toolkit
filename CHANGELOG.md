@@ -8,6 +8,10 @@ project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Deterministic CSV, JSON, ipset, nftables and conservative Synology Auto Block
+  exports, selected through CLI, environment or runtime TOML configuration.
+  Previous-output comparisons and safeguards work with tool-generated exports.
+
 - Previous-output comparison with added/removed entries, exact IPv4/IPv6
   coverage counts, and optional per-family coverage-loss safeguards.
 
@@ -47,10 +51,6 @@ project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `Content-Length`.
 - Reject corrupt `.zip` sources instead of treating them as plain text, and
   report local source and archive read failures consistently.
-
-### Planned
-
-- Additional output formats.
 
 ## [0.1.0] - 2026-09-21
 

@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import bisect
+import csv
 import hashlib
 import heapq
 import ipaddress
@@ -23,6 +24,8 @@ from dataclasses import dataclass, field
 from fractions import Fraction
 from io import TextIOBase
 from pathlib import Path
+
+from output_formats import OUTPUT_FORMATS, read_export, render_output
 
 try:
     import tomllib
@@ -241,6 +244,7 @@ def validate_overlap_action(action: str) -> str:
 
 
 RUNTIME_DEFAULTS = {
+    "output_format": "text",
     "max_ipv4_removal_percent": None,
     "max_ipv6_removal_percent": None,
     "report_file": None,
@@ -257,6 +261,7 @@ RUNTIME_DEFAULTS = {
     "overlap_action": "find",
 }
 SETTING_ENV = {
+    "output_format": "OUTPUT_FORMAT",
     "max_ipv4_removal_percent": "MAX_IPV4_REMOVAL_PERCENT",
     "max_ipv6_removal_percent": "MAX_IPV6_REMOVAL_PERCENT",
     "report_file": "REPORT_FILE",
@@ -275,6 +280,12 @@ SETTING_ENV = {
 
 
 def validate_setting(name: str, value):
+    if name == "output_format":
+        if not isinstance(value, str) or value not in OUTPUT_FORMATS:
+            raise SourceError(
+                f"output_format must be one of: {', '.join(OUTPUT_FORMATS)}"
+            )
+        return value
     if name in {"max_ipv4_removal_percent", "max_ipv6_removal_percent"}:
         if (
             type(value) not in {int, float}
@@ -380,7 +391,13 @@ def resolve_runtime_settings(args: argparse.Namespace) -> dict:
             }:
                 raise SourceError(f"{environment_name} must be a boolean")
             value = raw.strip().lower() in {"1", "true", "yes", "on"}
-        elif name in {"sources_file", "output", "report_file", "overlap_action"}:
+        elif name in {
+            "sources_file",
+            "output",
+            "report_file",
+            "overlap_action",
+            "output_format",
+        }:
             value = raw
         else:
             try:
@@ -728,7 +745,9 @@ def entry_sort_key(entry):
     return (entry.version, int(entry), 1, entry.max_prefixlen)
 
 
-def load_previous_output(output: Path) -> set[IPEntry] | None:
+def load_previous_output(
+    output: Path, output_format: str = "text"
+) -> set[IPEntry] | None:
     """Read a normalized baseline strictly, rather than silently ignoring damage."""
     try:
         text = output.read_text(encoding="utf-8-sig")
@@ -736,22 +755,12 @@ def load_previous_output(output: Path) -> set[IPEntry] | None:
         return None
     except (OSError, UnicodeError) as exc:
         raise SourceError("could not read previous output") from exc
-    entries: set[IPEntry] = set()
-    for number, line in enumerate(text.splitlines(), start=1):
-        candidate = line.strip()
-        if not candidate:
-            continue
-        try:
-            entries.add(
-                ipaddress.ip_network(candidate, strict=False)
-                if "/" in candidate
-                else ipaddress.ip_address(candidate)
-            )
-        except ValueError as exc:
-            raise SourceError(
-                f"previous output has an invalid entry at line {number}"
-            ) from exc
-    return entries
+    try:
+        return read_export(text, output_format)
+    except (ValueError, TypeError, KeyError, csv.Error) as exc:
+        raise SourceError(
+            "previous output is invalid for the selected output format"
+        ) from exc
 
 
 def coverage_intervals(entries: set[IPEntry], version: int) -> list[tuple[int, int]]:
@@ -862,6 +871,7 @@ def _normalize(
     previous_entries: set[IPEntry] | None = None,
     max_ipv4_removal_percent: float | None = None,
     max_ipv6_removal_percent: float | None = None,
+    output_format: str = "text",
 ) -> int:
     if not sources:
         raise SourceError("configure at least one source")
@@ -940,22 +950,24 @@ def _normalize(
     enforce_removal_limits(
         comparison, max_ipv4_removal_percent, max_ipv6_removal_percent
     )
-    ordered = sorted(entries, key=entry_sort_key)
+    try:
+        serialized = render_output(entries, output_format)
+    except ValueError as exc:
+        raise SourceError(str(exc)) from exc
     output.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.NamedTemporaryFile(
-        "w", encoding="utf-8", dir=output.parent, delete=False
+        "w", encoding="utf-8", newline="\n", dir=output.parent, delete=False
     ) as handle:
-        handle.write("\n".join(str(address) for address in ordered) + "\n")
+        handle.write(serialized)
         temporary = Path(handle.name)
     temporary.replace(output)
     if run_report is not None:
         run_report["output"] = {
             "path": str(output),
-            "sha256": hashlib.sha256(
-                ("\n".join(str(entry) for entry in ordered) + "\n").encode("utf-8")
-            ).hexdigest(),
+            "sha256": hashlib.sha256(serialized.encode("utf-8")).hexdigest(),
+            "format": output_format,
         }
-    return len(ordered)
+    return len(entries)
 
 
 def overlap_report_document(
@@ -1051,6 +1063,7 @@ def normalize(
     report_file: Path | None = None,
     max_ipv4_removal_percent: float | None = None,
     max_ipv6_removal_percent: float | None = None,
+    output_format: str = "text",
 ) -> int:
     locations = [
         item.location if isinstance(item, SourceSpec) else item for item in sources
@@ -1082,6 +1095,7 @@ def normalize(
             "max_zip_total_bytes": max_zip_total_bytes,
             "max_zip_compression_ratio": max_zip_compression_ratio,
             "allow_private_sources": allow_private_sources,
+            "output_format": output_format,
             "max_ipv4_removal_percent": max_ipv4_removal_percent,
             "max_ipv6_removal_percent": max_ipv6_removal_percent,
         },
@@ -1098,7 +1112,8 @@ def normalize(
         ):
             if limit is not None:
                 validate_setting(name, limit)
-        previous_entries = load_previous_output(output)
+        validate_setting("output_format", output_format)
+        previous_entries = load_previous_output(output, output_format)
         count = _normalize(
             sources,
             output,
@@ -1115,6 +1130,7 @@ def normalize(
             previous_entries,
             max_ipv4_removal_percent,
             max_ipv6_removal_percent,
+            output_format,
         )
     except (SourceError, OSError) as exc:
         document["status"] = "failed"
@@ -1169,6 +1185,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--version", action="version", version=f"%(prog)s {__version__}"
     )
     parser.add_argument("--source", action="append", default=None)
+    parser.add_argument("--output-format", choices=OUTPUT_FORMATS, default=None)
     for version in (4, 6):
         parser.add_argument(
             f"--max-ipv{version}-removal-percent",
@@ -1295,6 +1312,7 @@ def main() -> int:
             settings["report_file"],
             settings["max_ipv4_removal_percent"],
             settings["max_ipv6_removal_percent"],
+            settings["output_format"],
         )
     except SourceError as exc:
         parser.error(str(exc))

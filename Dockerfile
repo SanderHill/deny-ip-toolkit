@@ -3,7 +3,7 @@ FROM python:3.13-alpine
 WORKDIR /app
 COPY requirements.txt /app/requirements.txt
 RUN pip install --no-cache-dir --requirement /app/requirements.txt
-COPY deny_ip_toolkit.py /app/deny_ip_toolkit.py
+COPY deny_ip_toolkit.py output_formats.py /app/
 
 RUN addgroup -S app && adduser -S -G app app \
     && mkdir -p /app/output \
