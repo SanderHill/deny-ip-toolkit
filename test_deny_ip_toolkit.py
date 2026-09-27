@@ -1,5 +1,6 @@
 import hashlib
 import io
+import ipaddress
 import json
 import os
 import tempfile
@@ -15,6 +16,7 @@ from deny_ip_toolkit import (
     __version__,
     build_parser,
     candidate_files,
+    compare_outputs,
     configured_overlap_action,
     load_processing_config,
     load_runtime_config,
@@ -51,6 +53,184 @@ class InterruptedResponse(FakeResponse):
 
 
 class DenyIpToolkitTests(unittest.TestCase):
+    @staticmethod
+    def entries(*values):
+        return {
+            ipaddress.ip_network(value) if "/" in value else ipaddress.ip_address(value)
+            for value in values
+        }
+
+    def test_equivalent_representations_have_no_coverage_loss(self):
+        before = self.entries("192.0.2.0/24", "192.0.2.4", "2001:db8::/64")
+        after = self.entries(
+            "192.0.2.0/25",
+            "192.0.2.128/25",
+            "2001:db8::/65",
+            "2001:db8:0:0:8000::/65",
+        )
+        comparison = compare_outputs(before, after)
+        self.assertFalse(comparison["coverage_changed"])
+        self.assertTrue(comparison["added_entries"])
+        self.assertTrue(comparison["removed_entries"])
+        self.assertEqual(comparison["coverage"]["ipv4"]["previous_addresses"], 256)
+        self.assertEqual(comparison["coverage"]["ipv6"]["previous_addresses"], 2**64)
+        for family in ("ipv4", "ipv6"):
+            self.assertEqual(comparison["coverage"][family]["removed_addresses"], 0)
+
+    def test_additions_do_not_mask_removed_coverage(self):
+        comparison = compare_outputs(
+            self.entries("192.0.2.0/24"),
+            self.entries("192.0.2.0/25", "198.51.100.0/24"),
+        )
+        counts = comparison["coverage"]["ipv4"]
+        self.assertEqual(counts["removed_addresses"], 128)
+        self.assertEqual(counts["added_addresses"], 256)
+        self.assertEqual(counts["removed_percent"], 50)
+
+    def test_first_run_and_empty_baseline_are_distinct(self):
+        current = self.entries("192.0.2.4")
+        first = compare_outputs(None, current)
+        empty = compare_outputs(set(), current)
+        self.assertFalse(first["baseline_available"])
+        self.assertIsNone(first["coverage_changed"])
+        self.assertTrue(empty["baseline_available"])
+        self.assertTrue(empty["coverage_changed"])
+        self.assertEqual(empty["coverage"]["ipv4"]["removed_percent"], 0)
+
+    def test_safeguard_rejection_report_and_recovery(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            source, output, report = (
+                root / "input.txt",
+                root / "out.txt",
+                root / "report.json",
+            )
+            output.write_text("192.0.2.0/24\n", encoding="utf-8")
+            source.write_text("192.0.2.0/25\n", encoding="utf-8")
+            with self.assertRaisesRegex(SourceError, "previous output preserved"):
+                normalize(
+                    [str(source)],
+                    output,
+                    report_file=report,
+                    max_ipv4_removal_percent=49,
+                )
+            self.assertEqual(output.read_text(), "192.0.2.0/24\n")
+            document = json.loads(report.read_text())
+            self.assertEqual(document["status"], "failed")
+            self.assertTrue(document["comparison"]["safeguard_rejected"])
+            self.assertIsNone(document["output"])
+            normalize(
+                [str(source)], output, report_file=report, max_ipv4_removal_percent=50
+            )
+            document = json.loads(report.read_text())
+            self.assertEqual(document["status"], "success")
+            self.assertEqual(document["comparison"]["previous_entries"], 1)
+            self.assertEqual(
+                document["comparison"]["coverage"]["ipv4"]["removed_percent"], 50
+            )
+            self.assertEqual(output.read_text(), "192.0.2.0/25\n")
+
+    def test_ipv6_safeguard_handles_large_counts_without_expansion(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            source, output = root / "input.txt", root / "out.txt"
+            output.write_text("::/0\n", encoding="utf-8")
+            source.write_text("::/1\n", encoding="utf-8")
+            with self.assertRaisesRegex(SourceError, "IPv6"):
+                normalize([str(source)], output, max_ipv6_removal_percent=0)
+            normalize([str(source)], output, max_ipv6_removal_percent=50)
+            self.assertEqual(output.read_text(), "::/1\n")
+
+    def test_corrupt_previous_output_is_preserved(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            source, output = root / "input.txt", root / "out.txt"
+            source.write_text("192.0.2.4\n", encoding="utf-8")
+            output.write_text("broken baseline\n", encoding="utf-8")
+            with self.assertRaisesRegex(SourceError, "previous output"):
+                normalize([str(source)], output)
+            self.assertEqual(output.read_text(), "broken baseline\n")
+
+    def test_first_run_skips_limits_and_equivalent_change_passes_zero_limit(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            source, output, report = (
+                root / "input.txt",
+                root / "out.txt",
+                root / "report.json",
+            )
+            source.write_text("192.0.2.0/24\n", encoding="utf-8")
+            normalize(
+                [str(source)], output, report_file=report, max_ipv4_removal_percent=0
+            )
+            self.assertFalse(
+                json.loads(report.read_text())["comparison"]["baseline_available"]
+            )
+            source.write_text("192.0.2.0/25\n192.0.2.128/25\n", encoding="utf-8")
+            normalize(
+                [str(source)], output, report_file=report, max_ipv4_removal_percent=0
+            )
+            document = json.loads(report.read_text())
+            self.assertFalse(document["comparison"]["coverage_changed"])
+            self.assertEqual(document["comparison"]["current_entries"], 2)
+
+    def test_interval_comparison_matches_small_address_sets(self):
+        candidates = [
+            self.entries("192.0.2.0/29", "192.0.2.4/30"),
+            self.entries("192.0.2.0/30", "192.0.2.8/30"),
+            self.entries("192.0.2.2", "192.0.2.8"),
+            set(),
+        ]
+
+        def expanded(entries):
+            addresses = set()
+            for entry in entries:
+                if isinstance(entry, ipaddress.IPv4Network):
+                    addresses.update(int(address) for address in entry)
+                else:
+                    addresses.add(int(entry))
+            return addresses
+
+        for before in candidates:
+            for after in candidates:
+                with self.subTest(before=before, after=after):
+                    counts = compare_outputs(before, after)["coverage"]["ipv4"]
+                    old, new = expanded(before), expanded(after)
+                    self.assertEqual(counts["removed_addresses"], len(old - new))
+                    self.assertEqual(counts["added_addresses"], len(new - old))
+
+    def test_removal_limits_configuration_and_validation(self):
+        with tempfile.TemporaryDirectory() as folder:
+            config = Path(folder) / "config.toml"
+            config.write_text(
+                "version = 1\n[processing]\nmax_ipv4_removal_percent = 10.0\n"
+                "max_ipv6_removal_percent = 0\n",
+                encoding="utf-8",
+            )
+            with mock.patch.dict(
+                os.environ, {"MAX_IPV4_REMOVAL_PERCENT": "20"}, clear=True
+            ):
+                settings = resolve_runtime_settings(
+                    build_parser().parse_args(
+                        [
+                            "--config-file",
+                            str(config),
+                            "--max-ipv4-removal-percent",
+                            "30",
+                        ]
+                    )
+                )
+                self.assertEqual(settings["max_ipv4_removal_percent"], 30)
+                self.assertEqual(settings["max_ipv6_removal_percent"], 0)
+                for invalid in ("nan", "-1", "101"):
+                    with self.subTest(value=invalid):
+                        with self.assertRaises(SourceError):
+                            resolve_runtime_settings(
+                                build_parser().parse_args(
+                                    ["--max-ipv6-removal-percent", invalid]
+                                )
+                            )
+
     def test_failed_report_replacement_preserves_previous_report(self):
         with tempfile.TemporaryDirectory() as folder:
             report_file = Path(folder) / "report.json"
