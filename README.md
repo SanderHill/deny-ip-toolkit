@@ -98,6 +98,26 @@ non-finite ratios are rejected before sources are processed. Use
 `--no-allow-private-sources` to explicitly disable that option even if the
 configuration enables it.
 
+## Saved processing reports
+
+Use `--report-file ./output/run-report.json`, `REPORT_FILE`, or
+`report_file` in the TOML `[runtime]` section to save a JSON report.
+The report is replaced atomically and cannot target the denylist, local source,
+selected manifest, or configuration file (including aliases).
+
+Schema version 1 is documented in [the report format](docs/RUN_REPORT.md).
+Successful reports contain counts, source metadata, findings with line
+provenance, removed entries, warnings, processing settings and the SHA-256 of
+the exact output bytes. URLs are redacted. Reports contain source data and
+local paths: keep them private when appropriate.
+
+Failures during source processing or output writing produce a failed report;
+configuration/argument validation and unsafe report paths fail before report
+creation. Completed sources are listed, but incomplete results must not be
+used as a denylist. If saving the report fails after a successful run, the
+command fails but the new denylist is already written. A failed processing run
+preserves the previous valid denylist.
+
 ## Licensed source manifest
 
 For repeatable runs, copy `sources.example.toml` to a private configuration

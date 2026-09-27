@@ -19,7 +19,7 @@ risk reduction and user value, not by promised delivery dates.
 - [x] Add configurable overlap discovery and IP/range deduplication modes.
 - [x] Add a configuration file for Docker and scheduled use.
 - Support Synology, ipset, nftables, CSV, and JSON output formats.
-- Produce a machine-readable run summary and content hashes.
+- [x] Produce a machine-readable run summary and content hashes.
 
 ## Later: maintenance automation
 

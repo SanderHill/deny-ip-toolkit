@@ -1,5 +1,6 @@
 import hashlib
 import io
+import json
 import os
 import tempfile
 import unittest
@@ -23,6 +24,7 @@ from deny_ip_toolkit import (
     read_source,
     redact_source,
     resolve_runtime_settings,
+    save_run_report,
     source_name,
     validate_remote_url,
 )
@@ -49,6 +51,137 @@ class InterruptedResponse(FakeResponse):
 
 
 class DenyIpToolkitTests(unittest.TestCase):
+    def test_failed_report_replacement_preserves_previous_report(self):
+        with tempfile.TemporaryDirectory() as folder:
+            report_file = Path(folder) / "report.json"
+            report_file.write_text('{"status":"previous"}', encoding="utf-8")
+            with mock.patch.object(
+                Path, "replace", side_effect=OSError("write failed")
+            ):
+                with self.assertRaisesRegex(SourceError, "could not save run report"):
+                    save_run_report(report_file, {"status": "success"})
+            self.assertEqual(report_file.read_text(), '{"status":"previous"}')
+            self.assertEqual(list(Path(folder).iterdir()), [report_file])
+
+    def test_cli_rejects_report_targeting_configuration(self):
+        with tempfile.TemporaryDirectory() as folder:
+            config = Path(folder) / "config.toml"
+            contents = 'version = 1\n[runtime]\nreport_file = "config.toml"\n'
+            config.write_text(contents, encoding="utf-8")
+            with (
+                mock.patch.dict(os.environ, {}, clear=True),
+                mock.patch("sys.argv", ["tool", "--config-file", str(config)]),
+                mock.patch("sys.stderr", io.StringIO()),
+            ):
+                with self.assertRaises(SystemExit):
+                    main()
+            self.assertEqual(config.read_text(), contents)
+
+    def test_json_reports_all_modes_and_exact_output_hash(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            source = root / "input.txt"
+            source.write_text(
+                "192.0.2.0/24\n192.0.2.0/25\n192.0.2.4\n192.0.2.4\n",
+                encoding="utf-8",
+            )
+            output = root / "out.txt"
+            report_file = root / "report.json"
+            for action, expected_count in [
+                ("find", 3),
+                ("remove_single_ips", 2),
+                ("remove_ranges", 1),
+            ]:
+                with self.subTest(action=action):
+                    normalize(
+                        [str(source)],
+                        output,
+                        overlap_action=action,
+                        report_file=report_file,
+                    )
+                    document = json.loads(report_file.read_text())
+                    self.assertEqual(document["schema_version"], 1)
+                    self.assertEqual(document["status"], "success")
+                    self.assertEqual(
+                        document["counts"]["output_entries"], expected_count
+                    )
+                    self.assertEqual(document["counts"]["exact_duplicates"], 1)
+                    self.assertEqual(document["counts"]["nested_ranges"], 1)
+                    self.assertEqual(
+                        document["covered_ips"][0]["occurrences"][0]["line"], 3
+                    )
+                    self.assertEqual(
+                        document["output"]["sha256"],
+                        hashlib.sha256(output.read_bytes()).hexdigest(),
+                    )
+                    self.assertEqual(
+                        bool(document["warnings"]), action == "remove_ranges"
+                    )
+
+    def test_failed_json_report_preserves_output_and_redacts_url(self):
+        source = "https://user:password@example.test/list.txt?token=secret#private"
+        opener = mock.Mock()
+        opener.open.side_effect = TimeoutError("token=secret")
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            output = root / "out.txt"
+            output.write_text("192.0.2.9\n", encoding="utf-8")
+            report_file = root / "report.json"
+            with (
+                mock.patch("deny_ip_toolkit.validate_remote_url"),
+                mock.patch("urllib.request.build_opener", return_value=opener),
+            ):
+                with self.assertRaises(SourceError):
+                    normalize([source], output, report_file=report_file)
+            document = json.loads(report_file.read_text())
+            self.assertEqual(document["status"], "failed")
+            self.assertIsNone(document["output"])
+            self.assertIn("could not download", document["error"]["message"])
+            for secret in ("password", "token=secret", "#private"):
+                self.assertNotIn(secret, report_file.read_text())
+            self.assertEqual(output.read_text(), "192.0.2.9\n")
+
+    def test_report_cannot_overwrite_input_output_or_alias(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            source = root / "input.txt"
+            source.write_text("192.0.2.4\n", encoding="utf-8")
+            output = root / "out.txt"
+            output.write_text("192.0.2.9\n", encoding="utf-8")
+            alias = root / "alias.json"
+            alias.symlink_to(source)
+            for target in (source, output, alias):
+                with self.subTest(target=target):
+                    with self.assertRaisesRegex(SourceError, "must not overwrite"):
+                        normalize([str(source)], output, report_file=target)
+            self.assertEqual(source.read_text(), "192.0.2.4\n")
+            self.assertEqual(output.read_text(), "192.0.2.9\n")
+
+    def test_report_file_cli_overrides_toml(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder).resolve()
+            config = root / "config.toml"
+            config.write_text(
+                'version = 1\n[runtime]\nreport_file = "report.json"\n',
+                encoding="utf-8",
+            )
+            with mock.patch.dict(os.environ, {}, clear=True):
+                settings = resolve_runtime_settings(
+                    build_parser().parse_args(["--config-file", str(config)])
+                )
+                self.assertEqual(settings["report_file"], root / "report.json")
+                settings = resolve_runtime_settings(
+                    build_parser().parse_args(
+                        [
+                            "--config-file",
+                            str(config),
+                            "--report-file",
+                            "cli.json",
+                        ]
+                    )
+                )
+                self.assertEqual(settings["report_file"], Path("cli.json"))
+
     def test_cli_config_run_uses_relative_manifest_and_checksum(self):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder).resolve()
