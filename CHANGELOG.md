@@ -8,6 +8,9 @@ project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Previous-output comparison with added/removed entries, exact IPv4/IPv6
+  coverage counts, and optional per-family coverage-loss safeguards.
+
 - Optional versioned JSON run reports with provenance, overlap findings,
   removal counts, warnings, failure status, and output SHA-256.
 
@@ -35,6 +38,8 @@ project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   private-source access.
 
 ### Fixed
+
+- Preserve significant IPv6 colons when parsing entries such as ::/0.
 
 - Docker environment defaults no longer override explicit TOML settings.
 

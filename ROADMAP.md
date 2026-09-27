@@ -20,6 +20,7 @@ risk reduction and user value, not by promised delivery dates.
 - [x] Add a configuration file for Docker and scheduled use.
 - Support Synology, ipset, nftables, CSV, and JSON output formats.
 - [x] Produce a machine-readable run summary and content hashes.
+- [x] Compare with previous output and optionally reject excessive coverage loss.
 
 ## Later: maintenance automation
 

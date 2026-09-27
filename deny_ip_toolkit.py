@@ -20,6 +20,7 @@ import urllib.parse
 import urllib.request
 import zipfile
 from dataclasses import dataclass, field
+from fractions import Fraction
 from io import TextIOBase
 from pathlib import Path
 
@@ -37,6 +38,11 @@ DEFAULT_MAX_ZIP_TOTAL_BYTES = 100 * 1024 * 1024
 DEFAULT_MAX_ZIP_COMPRESSION_RATIO = 100.0
 COPY_CHUNK_BYTES = 64 * 1024
 OVERLAP_ACTIONS = {"find", "remove_single_ips", "remove_ranges"}
+PROCESSING_SETTINGS = {
+    "overlap_action",
+    "max_ipv4_removal_percent",
+    "max_ipv6_removal_percent",
+}
 __version__ = "0.1.0"
 
 IPAddress = ipaddress.IPv4Address | ipaddress.IPv6Address
@@ -235,6 +241,8 @@ def validate_overlap_action(action: str) -> str:
 
 
 RUNTIME_DEFAULTS = {
+    "max_ipv4_removal_percent": None,
+    "max_ipv6_removal_percent": None,
     "report_file": None,
     "sources": [],
     "sources_file": None,
@@ -249,6 +257,8 @@ RUNTIME_DEFAULTS = {
     "overlap_action": "find",
 }
 SETTING_ENV = {
+    "max_ipv4_removal_percent": "MAX_IPV4_REMOVAL_PERCENT",
+    "max_ipv6_removal_percent": "MAX_IPV6_REMOVAL_PERCENT",
     "report_file": "REPORT_FILE",
     "sources": "SOURCE_URLS",
     "sources_file": "SOURCES_FILE",
@@ -265,6 +275,14 @@ SETTING_ENV = {
 
 
 def validate_setting(name: str, value):
+    if name in {"max_ipv4_removal_percent", "max_ipv6_removal_percent"}:
+        if (
+            type(value) not in {int, float}
+            or not math.isfinite(value)
+            or not 0 <= value <= 100
+        ):
+            raise SourceError(f"{name} must be a finite percentage from 0 to 100")
+        return value
     if name == "sources":
         if not isinstance(value, list) or any(
             not isinstance(item, str) or not item.strip() for item in value
@@ -306,12 +324,12 @@ def load_runtime_config(path: Path) -> dict:
     runtime = document.get("runtime", {})
     if not isinstance(runtime, dict):
         raise SourceError("configuration runtime section must be a table")
-    if set(runtime) - (set(RUNTIME_DEFAULTS) - {"overlap_action"}):
+    if set(runtime) - (set(RUNTIME_DEFAULTS) - PROCESSING_SETTINGS):
         raise SourceError("configuration runtime section has unknown fields")
     processing = document.get("processing", {})
     if not isinstance(processing, dict):
         raise SourceError("configuration processing section must be a table")
-    unknown = sorted(set(processing) - {"overlap_action"})
+    unknown = sorted(set(processing) - PROCESSING_SETTINGS)
     if unknown:
         raise SourceError(
             f"configuration processing section has unknown fields: {', '.join(unknown)}"
@@ -366,7 +384,16 @@ def resolve_runtime_settings(args: argparse.Namespace) -> dict:
             value = raw
         else:
             try:
-                value = float(raw) if name == "max_zip_compression_ratio" else int(raw)
+                value = (
+                    float(raw)
+                    if name
+                    in {
+                        "max_zip_compression_ratio",
+                        "max_ipv4_removal_percent",
+                        "max_ipv6_removal_percent",
+                    }
+                    else int(raw)
+                )
             except ValueError as exc:
                 raise SourceError(
                     f"{environment_name} has an invalid numeric value"
@@ -544,7 +571,8 @@ def extract_occurrences(
                 r"(?<![\w.:/])(?:[0-9A-Fa-f:.]+(?:/\d{1,3})?)(?![\w.:/])",
                 line,
             ):
-                candidate = token.strip(".:") or token
+                # Leading/trailing colons can be significant in IPv6 (::/0).
+                candidate = token.strip(".") or token
                 try:
                     entry: IPEntry
                     if "/" in candidate:
@@ -700,6 +728,124 @@ def entry_sort_key(entry):
     return (entry.version, int(entry), 1, entry.max_prefixlen)
 
 
+def load_previous_output(output: Path) -> set[IPEntry] | None:
+    """Read a normalized baseline strictly, rather than silently ignoring damage."""
+    try:
+        text = output.read_text(encoding="utf-8-sig")
+    except FileNotFoundError:
+        return None
+    except (OSError, UnicodeError) as exc:
+        raise SourceError("could not read previous output") from exc
+    entries: set[IPEntry] = set()
+    for number, line in enumerate(text.splitlines(), start=1):
+        candidate = line.strip()
+        if not candidate:
+            continue
+        try:
+            entries.add(
+                ipaddress.ip_network(candidate, strict=False)
+                if "/" in candidate
+                else ipaddress.ip_address(candidate)
+            )
+        except ValueError as exc:
+            raise SourceError(
+                f"previous output has an invalid entry at line {number}"
+            ) from exc
+    return entries
+
+
+def coverage_intervals(entries: set[IPEntry], version: int) -> list[tuple[int, int]]:
+    intervals = []
+    for entry in entries:
+        if entry.version != version:
+            continue
+        if isinstance(entry, (ipaddress.IPv4Network, ipaddress.IPv6Network)):
+            intervals.append((int(entry.network_address), int(entry.broadcast_address)))
+        else:
+            intervals.append((int(entry), int(entry)))
+    merged: list[tuple[int, int]] = []
+    for start, end in sorted(intervals):
+        if merged and start <= merged[-1][1] + 1:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], end))
+        else:
+            merged.append((start, end))
+    return merged
+
+
+def coverage_comparison(
+    previous: set[IPEntry], current: set[IPEntry], version: int
+) -> dict:
+    before = coverage_intervals(previous, version)
+    after = coverage_intervals(current, version)
+    before_count = sum(end - start + 1 for start, end in before)
+    after_count = sum(end - start + 1 for start, end in after)
+    retained = 0
+    left = right = 0
+    while left < len(before) and right < len(after):
+        start = max(before[left][0], after[right][0])
+        end = min(before[left][1], after[right][1])
+        if start <= end:
+            retained += end - start + 1
+        if before[left][1] < after[right][1]:
+            left += 1
+        else:
+            right += 1
+    removed = before_count - retained
+    return {
+        "previous_addresses": before_count,
+        "current_addresses": after_count,
+        "added_addresses": after_count - retained,
+        "removed_addresses": removed,
+        "removed_percent": 100 * removed / before_count if before_count else 0.0,
+    }
+
+
+def compare_outputs(previous: set[IPEntry] | None, current: set[IPEntry]) -> dict:
+    baseline = previous if previous is not None else set()
+    coverage = {
+        f"ipv{version}": coverage_comparison(baseline, current, version)
+        for version in (4, 6)
+    }
+    return {
+        "baseline_available": previous is not None,
+        "previous_entries": len(baseline) if previous is not None else None,
+        "current_entries": len(current),
+        "added_entries": [
+            str(entry) for entry in sorted(current - baseline, key=entry_sort_key)
+        ],
+        "removed_entries": [
+            str(entry) for entry in sorted(baseline - current, key=entry_sort_key)
+        ],
+        "coverage": coverage,
+        "coverage_changed": any(
+            counts["added_addresses"] or counts["removed_addresses"]
+            for counts in coverage.values()
+        )
+        if previous is not None
+        else None,
+        "safeguard_rejected": False,
+    }
+
+
+def enforce_removal_limits(comparison: dict, ipv4_limit, ipv6_limit) -> None:
+    if not comparison["baseline_available"]:
+        return
+    for version, limit in ((4, ipv4_limit), (6, ipv6_limit)):
+        if limit is None:
+            continue
+        counts = comparison["coverage"][f"ipv{version}"]
+        # Compare exact integers/rational thresholds even for huge IPv6 ranges.
+        if counts["previous_addresses"] and (
+            Fraction(100 * counts["removed_addresses"], counts["previous_addresses"])
+            > Fraction(str(limit))
+        ):
+            comparison["safeguard_rejected"] = True
+            raise SourceError(
+                f"IPv{version} removed coverage exceeds the {limit}% limit; "
+                "previous output preserved"
+            )
+
+
 def _normalize(
     sources: list[str | SourceSpec],
     output: Path,
@@ -713,6 +859,9 @@ def _normalize(
     overlap_action: str = "find",
     report_stream: TextIOBase | None = None,
     run_report: dict | None = None,
+    previous_entries: set[IPEntry] | None = None,
+    max_ipv4_removal_percent: float | None = None,
+    max_ipv6_removal_percent: float | None = None,
 ) -> int:
     if not sources:
         raise SourceError("configure at least one source")
@@ -768,6 +917,29 @@ def _normalize(
         run_report.update(overlap_report_document(report, overlap_action, len(entries)))
     if report_stream is not None:
         write_overlap_report(report, overlap_action, report_stream)
+    comparison = compare_outputs(previous_entries, entries)
+    if run_report is not None:
+        run_report["comparison"] = comparison
+    if report_stream is not None:
+        if not comparison["baseline_available"]:
+            report_stream.write("comparison: first run, no previous output\n")
+        else:
+            report_stream.write(
+                f"comparison: {len(comparison['added_entries'])} entries added, "
+                f"{len(comparison['removed_entries'])} entries removed\n"
+            )
+            for action in ("added", "removed"):
+                for entry in comparison[f"{action}_entries"]:
+                    report_stream.write(f"  {action} {entry}\n")
+            for family, counts in comparison["coverage"].items():
+                report_stream.write(
+                    f"  {family}: {counts['added_addresses']} addresses added, "
+                    f"{counts['removed_addresses']} removed "
+                    f"({counts['removed_percent']:.6g}% of previous coverage)\n"
+                )
+    enforce_removal_limits(
+        comparison, max_ipv4_removal_percent, max_ipv6_removal_percent
+    )
     ordered = sorted(entries, key=entry_sort_key)
     output.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.NamedTemporaryFile(
@@ -877,6 +1049,8 @@ def normalize(
     overlap_action: str = "find",
     report_stream: TextIOBase | None = None,
     report_file: Path | None = None,
+    max_ipv4_removal_percent: float | None = None,
+    max_ipv6_removal_percent: float | None = None,
 ) -> int:
     locations = [
         item.location if isinstance(item, SourceSpec) else item for item in sources
@@ -908,13 +1082,23 @@ def normalize(
             "max_zip_total_bytes": max_zip_total_bytes,
             "max_zip_compression_ratio": max_zip_compression_ratio,
             "allow_private_sources": allow_private_sources,
+            "max_ipv4_removal_percent": max_ipv4_removal_percent,
+            "max_ipv6_removal_percent": max_ipv6_removal_percent,
         },
         "counts": None,
         "output": None,
         "warnings": [],
         "error": None,
+        "comparison": None,
     }
     try:
+        for name, limit in (
+            ("max_ipv4_removal_percent", max_ipv4_removal_percent),
+            ("max_ipv6_removal_percent", max_ipv6_removal_percent),
+        ):
+            if limit is not None:
+                validate_setting(name, limit)
+        previous_entries = load_previous_output(output)
         count = _normalize(
             sources,
             output,
@@ -927,7 +1111,10 @@ def normalize(
             allow_private_sources,
             overlap_action,
             report_stream,
-            document if report_file is not None else None,
+            document,
+            previous_entries,
+            max_ipv4_removal_percent,
+            max_ipv6_removal_percent,
         )
     except (SourceError, OSError) as exc:
         document["status"] = "failed"
@@ -982,6 +1169,13 @@ def build_parser() -> argparse.ArgumentParser:
         "--version", action="version", version=f"%(prog)s {__version__}"
     )
     parser.add_argument("--source", action="append", default=None)
+    for version in (4, 6):
+        parser.add_argument(
+            f"--max-ipv{version}-removal-percent",
+            type=float,
+            default=None,
+            help=f"reject removal above this percentage of previous IPv{version} coverage (0-100)",
+        )
     parser.add_argument(
         "--report-file",
         type=Path,
@@ -1099,6 +1293,8 @@ def main() -> int:
             settings["overlap_action"],
             sys.stdout,
             settings["report_file"],
+            settings["max_ipv4_removal_percent"],
+            settings["max_ipv6_removal_percent"],
         )
     except SourceError as exc:
         parser.error(str(exc))

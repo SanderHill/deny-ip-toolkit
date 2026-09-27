@@ -118,6 +118,42 @@ used as a denylist. If saving the report fails after a successful run, the
 command fails but the new denylist is already written. A failed processing run
 preserves the previous valid denylist.
 
+## Comparing with the previous list
+
+Each run compares its candidate with the existing output before replacement.
+The terminal and JSON report distinguish added/removed entries from actual
+changes in covered addresses. Replacing a /24 with two equivalent /25 entries
+changes the entries but not the blocked address space. IPv4 and IPv6 are
+measured independently, without expanding networks into individual addresses.
+
+To reject excessive loss of previous coverage:
+
+```toml
+[processing]
+max_ipv4_removal_percent = 10.0
+max_ipv6_removal_percent = 10.0
+```
+
+These optional settings also have CLI flags `--max-ipv4-removal-percent` and
+`--max-ipv6-removal-percent`, and environment variables
+`MAX_IPV4_REMOVAL_PERCENT` and `MAX_IPV6_REMOVAL_PERCENT`.
+Values must be finite and between 0 and 100. Defaults disable the safeguards.
+Loss strictly greater than the limit rejects the candidate and preserves the
+previous output. Exactly meeting the limit is allowed; zero rejects any loss.
+Added addresses elsewhere do not compensate for removed addresses. This
+measures lost previous coverage, not the net decrease in address count.
+
+Without previous output, the report identifies a first run and skips the limits.
+An existing empty list is a valid zero-coverage baseline. Invalid or unreadable
+previous output causes a failure rather than an unreliable comparison.
+Back up and repair such a baseline before retrying.
+
+The comparison uses the existing plain-text output and cannot tell why a source
+changed or whether its addresses are appropriate. Avoid simultaneous runs
+against the same output: comparison and replacement are not locked together.
+IPv6 counts in JSON may exceed JavaScript's exact number range; consumers must
+preserve large integers.
+
 ## Licensed source manifest
 
 For repeatable runs, copy `sources.example.toml` to a private configuration

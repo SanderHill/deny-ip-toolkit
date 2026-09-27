@@ -17,3 +17,6 @@ allow_private_sources = false
 [processing]
 # find | remove_single_ips | remove_ranges
 overlap_action = "find"
+# Optional safeguards: reject loss above this share of previous coverage.
+# max_ipv4_removal_percent = 10.0
+# max_ipv6_removal_percent = 10.0
