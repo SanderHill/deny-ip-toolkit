@@ -8,6 +8,7 @@ import bisect
 import hashlib
 import heapq
 import ipaddress
+import json
 import math
 import os
 import re
@@ -234,6 +235,7 @@ def validate_overlap_action(action: str) -> str:
 
 
 RUNTIME_DEFAULTS = {
+    "report_file": None,
     "sources": [],
     "sources_file": None,
     "output": Path("./output/deny-ip-list.txt"),
@@ -247,6 +249,7 @@ RUNTIME_DEFAULTS = {
     "overlap_action": "find",
 }
 SETTING_ENV = {
+    "report_file": "REPORT_FILE",
     "sources": "SOURCE_URLS",
     "sources_file": "SOURCES_FILE",
     "output": "OUTPUT_FILE",
@@ -268,7 +271,7 @@ def validate_setting(name: str, value):
         ):
             raise SourceError("sources must be an array of non-empty strings")
         return value
-    if name in {"output", "sources_file"}:
+    if name in {"output", "sources_file", "report_file"}:
         if not isinstance(value, (str, Path)) or not str(value).strip():
             raise SourceError(f"{name} must be a non-empty path")
         return Path(value).expanduser()
@@ -317,7 +320,7 @@ def load_runtime_config(path: Path) -> dict:
         name: validate_setting(name, value)
         for name, value in {**runtime, **processing}.items()
     }
-    for name in ("output", "sources_file"):
+    for name in ("output", "sources_file", "report_file"):
         if name in settings and not settings[name].is_absolute():
             settings[name] = (path.resolve().parent / settings[name]).resolve()
     if "sources" in settings:
@@ -359,7 +362,7 @@ def resolve_runtime_settings(args: argparse.Namespace) -> dict:
             }:
                 raise SourceError(f"{environment_name} must be a boolean")
             value = raw.strip().lower() in {"1", "true", "yes", "on"}
-        elif name in {"sources_file", "output", "overlap_action"}:
+        elif name in {"sources_file", "output", "report_file", "overlap_action"}:
             value = raw
         else:
             try:
@@ -697,7 +700,7 @@ def entry_sort_key(entry):
     return (entry.version, int(entry), 1, entry.max_prefixlen)
 
 
-def normalize(
+def _normalize(
     sources: list[str | SourceSpec],
     output: Path,
     timeout: int = DEFAULT_TIMEOUT,
@@ -709,6 +712,7 @@ def normalize(
     allow_private_sources: bool = False,
     overlap_action: str = "find",
     report_stream: TextIOBase | None = None,
+    run_report: dict | None = None,
 ) -> int:
     if not sources:
         raise SourceError("configure at least one source")
@@ -731,6 +735,19 @@ def normalize(
             )
             if spec.sha256:
                 verify_sha256(downloaded, spec.sha256)
+            if run_report is not None:
+                run_report["sources"].append(
+                    {
+                        "location": redact_source(spec.location),
+                        "license": spec.license,
+                        "license_url": redact_source(spec.license_url)
+                        if spec.license_url
+                        else None,
+                        "allowed_use": spec.allowed_use,
+                        "expected_sha256": spec.sha256,
+                        "checksum_verified": bool(spec.sha256),
+                    }
+                )
             paths = candidate_files(
                 downloaded,
                 workdir / f"source-{index}",
@@ -747,6 +764,8 @@ def normalize(
         )
     report = analyze_overlaps(occurrences)
     entries = apply_overlap_action(entries, report, overlap_action)
+    if run_report is not None:
+        run_report.update(overlap_report_document(report, overlap_action, len(entries)))
     if report_stream is not None:
         write_overlap_report(report, overlap_action, report_stream)
     ordered = sorted(entries, key=entry_sort_key)
@@ -757,7 +776,176 @@ def normalize(
         handle.write("\n".join(str(address) for address in ordered) + "\n")
         temporary = Path(handle.name)
     temporary.replace(output)
+    if run_report is not None:
+        run_report["output"] = {
+            "path": str(output),
+            "sha256": hashlib.sha256(
+                ("\n".join(str(entry) for entry in ordered) + "\n").encode("utf-8")
+            ).hexdigest(),
+        }
     return len(ordered)
+
+
+def overlap_report_document(
+    report: OverlapReport, action: str, output_count: int
+) -> dict:
+    def detail(entry):
+        return {
+            "entry": str(entry),
+            "occurrences": [
+                {"source": item.source, "line": item.line}
+                for item in report.occurrences[entry]
+            ],
+        }
+
+    ordered = sorted(report.occurrences, key=entry_sort_key)
+    return {
+        "counts": {
+            "valid_occurrences": sum(
+                len(items) for items in report.occurrences.values()
+            ),
+            "unique_entries": len(ordered),
+            "exact_duplicates": sum(
+                len(items) - 1 for items in report.occurrences.values()
+            ),
+            "covered_ips": len(report.covered_addresses),
+            "nested_ranges": len(report.nested_networks),
+            "removed_entries": len(report.removed_entries),
+            "output_entries": output_count,
+        },
+        "exact_duplicates": [
+            detail(entry) for entry in ordered if len(report.occurrences[entry]) > 1
+        ],
+        "covered_ips": [
+            {**detail(entry), "covering_range": str(report.covered_addresses[entry])}
+            for entry in sorted(report.covered_addresses, key=entry_sort_key)
+        ],
+        "nested_ranges": [
+            {**detail(entry), "parent_range": str(report.nested_networks[entry])}
+            for entry in sorted(report.nested_networks, key=entry_sort_key)
+        ],
+        "removed_entries": [
+            detail(entry)
+            for entry in sorted(report.removed_entries, key=entry_sort_key)
+        ],
+        "warnings": [
+            "remove_ranges can reduce blocked address space; unlisted addresses "
+            "from removed ranges are no longer included."
+        ]
+        if action == "remove_ranges"
+        else [],
+    }
+
+
+def validate_report_path(path: Path, protected: list[Path]) -> None:
+    target = path.resolve()
+    for source in protected:
+        if target == source.resolve() or (
+            path.exists() and source.exists() and path.samefile(source)
+        ):
+            raise SourceError("report path must not overwrite an input or output file")
+
+
+def save_run_report(path: Path, document: dict) -> None:
+    temporary = None
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with tempfile.NamedTemporaryFile(
+            "w", encoding="utf-8", dir=path.parent, delete=False
+        ) as handle:
+            temporary = Path(handle.name)
+            json.dump(document, handle, indent=2, sort_keys=True)
+            handle.write("\n")
+        temporary.replace(path)
+    except OSError as exc:
+        raise SourceError(f"could not save run report: {type(exc).__name__}") from exc
+    finally:
+        if temporary is not None and temporary.exists():
+            temporary.unlink()
+
+
+def normalize(
+    sources: list[str | SourceSpec],
+    output: Path,
+    timeout: int = DEFAULT_TIMEOUT,
+    max_download_bytes: int = DEFAULT_MAX_DOWNLOAD_BYTES,
+    max_zip_members: int = DEFAULT_MAX_ZIP_MEMBERS,
+    max_zip_member_bytes: int = DEFAULT_MAX_ZIP_MEMBER_BYTES,
+    max_zip_total_bytes: int = DEFAULT_MAX_ZIP_TOTAL_BYTES,
+    max_zip_compression_ratio: float = DEFAULT_MAX_ZIP_COMPRESSION_RATIO,
+    allow_private_sources: bool = False,
+    overlap_action: str = "find",
+    report_stream: TextIOBase | None = None,
+    report_file: Path | None = None,
+) -> int:
+    locations = [
+        item.location if isinstance(item, SourceSpec) else item for item in sources
+    ]
+    if report_file is not None:
+        validate_report_path(
+            report_file,
+            [
+                output,
+                *[
+                    Path(item).expanduser()
+                    for item in locations
+                    if not urllib.parse.urlsplit(item).scheme
+                ],
+            ],
+        )
+    document = {
+        "schema_version": 1,
+        "tool_version": __version__,
+        "status": "running",
+        "sources": [],
+        "configured_sources": [redact_source(item) for item in locations],
+        "settings": {
+            "overlap_action": overlap_action,
+            "timeout": timeout,
+            "max_download_bytes": max_download_bytes,
+            "max_zip_members": max_zip_members,
+            "max_zip_member_bytes": max_zip_member_bytes,
+            "max_zip_total_bytes": max_zip_total_bytes,
+            "max_zip_compression_ratio": max_zip_compression_ratio,
+            "allow_private_sources": allow_private_sources,
+        },
+        "counts": None,
+        "output": None,
+        "warnings": [],
+        "error": None,
+    }
+    try:
+        count = _normalize(
+            sources,
+            output,
+            timeout,
+            max_download_bytes,
+            max_zip_members,
+            max_zip_member_bytes,
+            max_zip_total_bytes,
+            max_zip_compression_ratio,
+            allow_private_sources,
+            overlap_action,
+            report_stream,
+            document if report_file is not None else None,
+        )
+    except (SourceError, OSError) as exc:
+        document["status"] = "failed"
+        # Never serialize exception chains or arbitrary OS error messages.
+        message = str(exc) if isinstance(exc, SourceError) else "could not write output"
+        for location in locations:
+            message = message.replace(location, redact_source(location))
+        document["error"] = {"type": type(exc).__name__, "message": message}
+        if report_file is not None:
+            try:
+                save_run_report(report_file, document)
+            except SourceError as report_error:
+                raise SourceError(f"{message}; {report_error}") from exc
+        raise SourceError(message) from exc
+    document["status"] = "success"
+    if report_file is not None:
+        save_run_report(report_file, document)
+    return count
 
 
 def configured_sources(cli_sources: list[str]) -> list[str]:
@@ -794,6 +982,12 @@ def build_parser() -> argparse.ArgumentParser:
         "--version", action="version", version=f"%(prog)s {__version__}"
     )
     parser.add_argument("--source", action="append", default=None)
+    parser.add_argument(
+        "--report-file",
+        type=Path,
+        default=None,
+        help="optional versioned JSON processing report",
+    )
     parser.add_argument(
         "--sources-file",
         type=Path,
@@ -877,6 +1071,18 @@ def main() -> int:
     args = parser.parse_args()
     try:
         settings = resolve_runtime_settings(args)
+        if settings["report_file"]:
+            validate_report_path(
+                settings["report_file"],
+                [
+                    settings["output"],
+                    *[
+                        path
+                        for path in (args.config_file, settings["sources_file"])
+                        if path is not None
+                    ],
+                ],
+            )
         sources = list(settings["sources"])
         if settings["sources_file"]:
             sources.extend(load_source_manifest(settings["sources_file"]))
@@ -892,6 +1098,7 @@ def main() -> int:
             settings["allow_private_sources"],
             settings["overlap_action"],
             sys.stdout,
+            settings["report_file"],
         )
     except SourceError as exc:
         parser.error(str(exc))

@@ -8,6 +8,9 @@ project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Optional versioned JSON run reports with provenance, overlap findings,
+  removal counts, warnings, failure status, and output SHA-256.
+
 - Configurable limits for remote downloads, ZIP members, expanded archive
   sizes, and compression ratios.
 - Streaming downloads and archive extraction to avoid unbounded in-memory
