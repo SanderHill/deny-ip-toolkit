@@ -17,6 +17,13 @@ use. Output stays local unless you choose to publish it yourself.
 
 ## Usage
 
+Plain text is the default output. `--output-format` also supports `csv`, `json`,
+`ipset`, `nftables`, and `synology` (DSM 7 Auto Block, individual IPv4 only).
+Set `runtime.output_format` in TOML or `OUTPUT_FORMAT` in the environment for
+scheduled runs. See [output formats and manual import instructions](docs/OUTPUT_FORMATS.md)
+for supported entries, limitations and the distinction between JSON denylist
+exports and JSON run reports. The toolkit exports files; it never applies rules.
+
 ```bash
 python3 deny_ip_toolkit.py \
   --source ./my-own-list.txt \
@@ -79,7 +86,7 @@ precedence over `OVERLAP_ACTION`, which takes precedence over the configuration
 file. Conflicting CLI options and unknown configuration values are rejected.
 
 The same configuration file can include a `[runtime]` table with `sources`
-(an array of source locations), `sources_file` (a licensed manifest), `output`,
+(an array of source locations), `sources_file` (a licensed manifest), `output`, `output_format`,
 `timeout`, `max_download_bytes`, `max_zip_members`,
 `max_zip_member_bytes`, `max_zip_total_bytes`,
 `max_zip_compression_ratio`, and `allow_private_sources`.

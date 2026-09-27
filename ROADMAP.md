@@ -18,7 +18,7 @@ risk reduction and user value, not by promised delivery dates.
 - [x] Add a source manifest with license, checksum, and provenance metadata.
 - [x] Add configurable overlap discovery and IP/range deduplication modes.
 - [x] Add a configuration file for Docker and scheduled use.
-- Support Synology, ipset, nftables, CSV, and JSON output formats.
+- [x] Support Synology Auto Block (individual IPv4), ipset, nftables, CSV, and JSON exports.
 - [x] Produce a machine-readable run summary and content hashes.
 - [x] Compare with previous output and optionally reject excessive coverage loss.
 

@@ -5,6 +5,8 @@ version = 1
 # sources = ["./my-permitted-list.txt"]
 # sources_file = "./sources.toml"
 output = "../output/deny-ip-list.txt"
+# text | csv | json | ipset | nftables | synology
+output_format = "text"
 # report_file = "../output/run-report.json"
 timeout = 60
 max_download_bytes = 52428800
