@@ -1,5 +1,18 @@
 version = 1
 
+[runtime]
+# Relative paths resolve from this configuration's directory.
+# sources = ["./my-permitted-list.txt"]
+# sources_file = "./sources.toml"
+output = "../output/deny-ip-list.txt"
+timeout = 60
+max_download_bytes = 52428800
+max_zip_members = 1000
+max_zip_member_bytes = 26214400
+max_zip_total_bytes = 104857600
+max_zip_compression_ratio = 100.0
+allow_private_sources = false
+
 [processing]
 # find | remove_single_ips | remove_ranges
 overlap_action = "find"
