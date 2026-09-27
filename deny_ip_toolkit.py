@@ -8,6 +8,7 @@ import bisect
 import hashlib
 import heapq
 import ipaddress
+import math
 import os
 import re
 import socket
@@ -97,7 +98,7 @@ def positive_int(value: str) -> int:
 
 def positive_float(value: str) -> float:
     parsed = float(value)
-    if parsed <= 0:
+    if not math.isfinite(parsed) or parsed <= 0:
         raise argparse.ArgumentTypeError("must be greater than zero")
     return parsed
 
@@ -232,15 +233,78 @@ def validate_overlap_action(action: str) -> str:
     return action
 
 
-def load_processing_config(path: Path) -> ProcessingConfig:
-    """Load the processing section of a versioned TOML configuration file."""
+RUNTIME_DEFAULTS = {
+    "sources": [],
+    "sources_file": None,
+    "output": Path("./output/deny-ip-list.txt"),
+    "timeout": DEFAULT_TIMEOUT,
+    "max_download_bytes": DEFAULT_MAX_DOWNLOAD_BYTES,
+    "max_zip_members": DEFAULT_MAX_ZIP_MEMBERS,
+    "max_zip_member_bytes": DEFAULT_MAX_ZIP_MEMBER_BYTES,
+    "max_zip_total_bytes": DEFAULT_MAX_ZIP_TOTAL_BYTES,
+    "max_zip_compression_ratio": DEFAULT_MAX_ZIP_COMPRESSION_RATIO,
+    "allow_private_sources": False,
+    "overlap_action": "find",
+}
+SETTING_ENV = {
+    "sources": "SOURCE_URLS",
+    "sources_file": "SOURCES_FILE",
+    "output": "OUTPUT_FILE",
+    "timeout": "HTTP_TIMEOUT",
+    "max_download_bytes": "MAX_DOWNLOAD_BYTES",
+    "max_zip_members": "MAX_ZIP_MEMBERS",
+    "max_zip_member_bytes": "MAX_ZIP_MEMBER_BYTES",
+    "max_zip_total_bytes": "MAX_ZIP_TOTAL_BYTES",
+    "max_zip_compression_ratio": "MAX_ZIP_COMPRESSION_RATIO",
+    "allow_private_sources": "ALLOW_PRIVATE_SOURCES",
+    "overlap_action": "OVERLAP_ACTION",
+}
+
+
+def validate_setting(name: str, value):
+    if name == "sources":
+        if not isinstance(value, list) or any(
+            not isinstance(item, str) or not item.strip() for item in value
+        ):
+            raise SourceError("sources must be an array of non-empty strings")
+        return value
+    if name in {"output", "sources_file"}:
+        if not isinstance(value, (str, Path)) or not str(value).strip():
+            raise SourceError(f"{name} must be a non-empty path")
+        return Path(value).expanduser()
+    if name == "allow_private_sources":
+        if type(value) is not bool:
+            raise SourceError("allow_private_sources must be a boolean")
+        return value
+    if name == "overlap_action":
+        if not isinstance(value, str):
+            raise SourceError("overlap_action must be a string")
+        return validate_overlap_action(value)
+    if name == "max_zip_compression_ratio":
+        if type(value) not in {int, float} or not math.isfinite(value) or value <= 0:
+            raise SourceError(f"{name} must be a finite positive number")
+        return value
+    if type(value) is not int or value <= 0:
+        raise SourceError(f"{name} must be a positive integer")
+    return value
+
+
+def load_runtime_config(path: Path) -> dict:
+    """Validate the complete TOML configuration before processing any source."""
     try:
         with path.open("rb") as handle:
             document = tomllib.load(handle)
     except (OSError, tomllib.TOMLDecodeError) as exc:
         raise SourceError(f"could not read configuration {path}: {exc}") from exc
-    if document.get("version") != 1:
+    if type(document.get("version")) is not int or document.get("version") != 1:
         raise SourceError("configuration version must be 1")
+    if set(document) - {"version", "runtime", "processing"}:
+        raise SourceError("configuration has unknown top-level fields")
+    runtime = document.get("runtime", {})
+    if not isinstance(runtime, dict):
+        raise SourceError("configuration runtime section must be a table")
+    if set(runtime) - (set(RUNTIME_DEFAULTS) - {"overlap_action"}):
+        raise SourceError("configuration runtime section has unknown fields")
     processing = document.get("processing", {})
     if not isinstance(processing, dict):
         raise SourceError("configuration processing section must be a table")
@@ -249,10 +313,72 @@ def load_processing_config(path: Path) -> ProcessingConfig:
         raise SourceError(
             f"configuration processing section has unknown fields: {', '.join(unknown)}"
         )
-    action = processing.get("overlap_action", "find")
-    if not isinstance(action, str):
-        raise SourceError("configuration overlap_action must be a string")
-    return ProcessingConfig(overlap_action=validate_overlap_action(action))
+    settings = {
+        name: validate_setting(name, value)
+        for name, value in {**runtime, **processing}.items()
+    }
+    for name in ("output", "sources_file"):
+        if name in settings and not settings[name].is_absolute():
+            settings[name] = (path.resolve().parent / settings[name]).resolve()
+    if "sources" in settings:
+        settings["sources"] = [
+            source
+            if urllib.parse.urlsplit(source).scheme
+            else str((path.resolve().parent / Path(source).expanduser()).resolve())
+            for source in settings["sources"]
+        ]
+    return settings
+
+
+def load_processing_config(path: Path) -> ProcessingConfig:
+    return ProcessingConfig(
+        overlap_action=load_runtime_config(path).get("overlap_action", "find")
+    )
+
+
+def resolve_runtime_settings(args: argparse.Namespace) -> dict:
+    settings = dict(RUNTIME_DEFAULTS)
+    if args.config_file:
+        settings.update(load_runtime_config(args.config_file))
+    for name, environment_name in SETTING_ENV.items():
+        raw = os.getenv(environment_name)
+        if raw is None or raw == "":
+            continue
+        if name == "sources":
+            value = [line.strip() for line in raw.splitlines() if line.strip()]
+        elif name == "allow_private_sources":
+            if raw.strip().lower() not in {
+                "1",
+                "true",
+                "yes",
+                "on",
+                "0",
+                "false",
+                "no",
+                "off",
+            }:
+                raise SourceError(f"{environment_name} must be a boolean")
+            value = raw.strip().lower() in {"1", "true", "yes", "on"}
+        elif name in {"sources_file", "output", "overlap_action"}:
+            value = raw
+        else:
+            try:
+                value = float(raw) if name == "max_zip_compression_ratio" else int(raw)
+            except ValueError as exc:
+                raise SourceError(
+                    f"{environment_name} has an invalid numeric value"
+                ) from exc
+        settings[name] = validate_setting(name, value)
+    for name in RUNTIME_DEFAULTS:
+        cli_name = "source" if name == "sources" else name
+        value = getattr(args, cli_name, None)
+        if value is not None:
+            # Preserve the existing additive CLI + SOURCE_URLS source workflow.
+            if name == "sources":
+                settings[name] = [*value, *settings[name]]
+            else:
+                settings[name] = validate_setting(name, value)
+    return settings
 
 
 def verify_sha256(path: Path, expected: str) -> None:
@@ -667,11 +793,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--version", action="version", version=f"%(prog)s {__version__}"
     )
-    parser.add_argument("--source", action="append", default=[])
+    parser.add_argument("--source", action="append", default=None)
     parser.add_argument(
         "--sources-file",
         type=Path,
-        default=Path(os.environ["SOURCES_FILE"]) if os.getenv("SOURCES_FILE") else None,
+        default=None,
         help="versioned TOML manifest containing licensed source metadata",
     )
     parser.add_argument(
@@ -683,48 +809,42 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--output",
         type=Path,
-        default=Path(os.getenv("OUTPUT_FILE", "./output/deny-ip-list.txt")),
+        default=None,
     )
     parser.add_argument(
         "--timeout",
-        type=int,
-        default=int(os.getenv("HTTP_TIMEOUT", str(DEFAULT_TIMEOUT))),
+        type=positive_int,
+        default=None,
     )
     parser.add_argument(
         "--max-download-bytes",
         type=positive_int,
-        default=int(os.getenv("MAX_DOWNLOAD_BYTES", str(DEFAULT_MAX_DOWNLOAD_BYTES))),
+        default=None,
     )
     parser.add_argument(
         "--max-zip-members",
         type=positive_int,
-        default=int(os.getenv("MAX_ZIP_MEMBERS", str(DEFAULT_MAX_ZIP_MEMBERS))),
+        default=None,
     )
     parser.add_argument(
         "--max-zip-member-bytes",
         type=positive_int,
-        default=int(
-            os.getenv("MAX_ZIP_MEMBER_BYTES", str(DEFAULT_MAX_ZIP_MEMBER_BYTES))
-        ),
+        default=None,
     )
     parser.add_argument(
         "--max-zip-total-bytes",
         type=positive_int,
-        default=int(os.getenv("MAX_ZIP_TOTAL_BYTES", str(DEFAULT_MAX_ZIP_TOTAL_BYTES))),
+        default=None,
     )
     parser.add_argument(
         "--max-zip-compression-ratio",
         type=positive_float,
-        default=float(
-            os.getenv(
-                "MAX_ZIP_COMPRESSION_RATIO", str(DEFAULT_MAX_ZIP_COMPRESSION_RATIO)
-            )
-        ),
+        default=None,
     )
     parser.add_argument(
         "--allow-private-sources",
-        action="store_true",
-        default=environment_flag("ALLOW_PRIVATE_SOURCES"),
+        action=argparse.BooleanOptionalAction,
+        default=None,
         help="allow trusted sources on private, loopback, or link-local networks",
     )
     overlap_group = parser.add_mutually_exclusive_group()
@@ -756,25 +876,26 @@ def main() -> int:
     parser = build_parser()
     args = parser.parse_args()
     try:
-        overlap_action = configured_overlap_action(
-            args.overlap_action, args.config_file
-        )
+        settings = resolve_runtime_settings(args)
+        sources = list(settings["sources"])
+        if settings["sources_file"]:
+            sources.extend(load_source_manifest(settings["sources_file"]))
         count = normalize(
-            configured_source_specs(args.source, args.sources_file),
-            args.output,
-            args.timeout,
-            args.max_download_bytes,
-            args.max_zip_members,
-            args.max_zip_member_bytes,
-            args.max_zip_total_bytes,
-            args.max_zip_compression_ratio,
-            args.allow_private_sources,
-            overlap_action,
+            sources,
+            settings["output"],
+            settings["timeout"],
+            settings["max_download_bytes"],
+            settings["max_zip_members"],
+            settings["max_zip_member_bytes"],
+            settings["max_zip_total_bytes"],
+            settings["max_zip_compression_ratio"],
+            settings["allow_private_sources"],
+            settings["overlap_action"],
             sys.stdout,
         )
     except SourceError as exc:
         parser.error(str(exc))
-    print(f"wrote {count} unique addresses to {args.output}")
+    print(f"wrote {count} unique addresses to {settings['output']}")
     return 0
 
 

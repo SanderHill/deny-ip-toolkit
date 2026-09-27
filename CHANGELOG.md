@@ -27,7 +27,13 @@ project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   or their listed individual IP addresses, configurable through TOML, the CLI,
   or the environment.
 
+- Complete runtime TOML settings, relative configuration paths, validated
+  environment overrides, and explicit CLI overrides including disabling
+  private-source access.
+
 ### Fixed
+
+- Docker environment defaults no longer override explicit TOML settings.
 
 - Reject truncated downloads whose body does not match the declared
   `Content-Length`.

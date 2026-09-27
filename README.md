@@ -78,6 +78,26 @@ are `find`, `remove_single_ips`, and `remove_ranges`. A CLI overlap option takes
 precedence over `OVERLAP_ACTION`, which takes precedence over the configuration
 file. Conflicting CLI options and unknown configuration values are rejected.
 
+The same configuration file can include a `[runtime]` table with `sources`
+(an array of source locations), `sources_file` (a licensed manifest), `output`,
+`timeout`, `max_download_bytes`, `max_zip_members`,
+`max_zip_member_bytes`, `max_zip_total_bytes`,
+`max_zip_compression_ratio`, and `allow_private_sources`.
+See `config.example.toml` for a complete example.
+
+Relative local source, manifest, and output paths in TOML resolve from the
+configuration directory. CLI and environment paths resolve from the working
+directory. Explicit CLI values override explicit non-empty environment values,
+then TOML, then built-in defaults. Source lists preserve the existing additive
+behavior: CLI sources are added to the environment source list, or the TOML
+source list when `SOURCE_URLS` is unset. A selected source manifest is added
+and retains its required license and checksum validation.
+
+Unknown configuration fields, incorrect types, non-positive limits and
+non-finite ratios are rejected before sources are processed. Use
+`--no-allow-private-sources` to explicitly disable that option even if the
+configuration enables it.
+
 ## Licensed source manifest
 
 For repeatable runs, copy `sources.example.toml` to a private configuration
@@ -137,13 +157,18 @@ weakens SSRF protection and should not be used with untrusted source URLs.
 ## Docker
 
 Copy `.env.example` to `.env`, configure sources you are permitted to use, and
-optionally copy `config.example.toml` to `config/config.toml`. Then run:
+optionally copy `config.example.toml` to `config/config.toml` and set
+`CONFIG_FILE=/app/config/config.toml` in `.env`. Then run:
 
 ```bash
 docker compose up --build
 ```
 
 The generated list is written to `./output/deny-ip-list.txt`.
+Docker Compose passes unset overrides as empty values, allowing TOML and the
+tool's defaults to take effect. When specifying output in container TOML, use
+`/app/output/deny-ip-list.txt` or a relative path that resolves into the mounted
+output directory.
 
 ## Data and licensing
 

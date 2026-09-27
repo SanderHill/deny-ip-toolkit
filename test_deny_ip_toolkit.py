@@ -16,10 +16,13 @@ from deny_ip_toolkit import (
     candidate_files,
     configured_overlap_action,
     load_processing_config,
+    load_runtime_config,
     load_source_manifest,
+    main,
     normalize,
     read_source,
     redact_source,
+    resolve_runtime_settings,
     source_name,
     validate_remote_url,
 )
@@ -46,6 +49,131 @@ class InterruptedResponse(FakeResponse):
 
 
 class DenyIpToolkitTests(unittest.TestCase):
+    def test_cli_config_run_uses_relative_manifest_and_checksum(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder).resolve()
+            source = root / "input.txt"
+            source.write_text("192.0.2.0/24\n192.0.2.4\n", encoding="utf-8")
+            digest = hashlib.sha256(source.read_bytes()).hexdigest()
+            manifest = root / "sources.toml"
+            manifest.write_text(
+                'version = 1\n[[sources]]\nlocation = "input.txt"\n'
+                'license = "CC0-1.0"\nlicense_url = "https://example.test/license"\n'
+                f'sha256 = "{digest}"\nallowed_use = "Test fixture"\n',
+                encoding="utf-8",
+            )
+            config = root / "config.toml"
+            config.write_text(
+                'version = 1\n[runtime]\nsources_file = "sources.toml"\n'
+                'output = "out.txt"\n[processing]\n'
+                'overlap_action = "remove_single_ips"\n',
+                encoding="utf-8",
+            )
+            with (
+                mock.patch.dict(os.environ, {}, clear=True),
+                mock.patch("sys.argv", ["tool", "--config-file", str(config)]),
+                mock.patch("sys.stdout", io.StringIO()),
+            ):
+                self.assertEqual(main(), 0)
+                self.assertEqual((root / "out.txt").read_text(), "192.0.2.0/24\n")
+                source.write_text("192.0.2.9\n", encoding="utf-8")
+                with mock.patch("sys.stderr", io.StringIO()):
+                    with self.assertRaises(SystemExit):
+                        main()
+                self.assertEqual((root / "out.txt").read_text(), "192.0.2.0/24\n")
+
+    def test_runtime_config_resolves_paths_and_precedence(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder).resolve()
+            config = root / "config.toml"
+            config.write_text(
+                'version = 1\n[runtime]\nsources = ["input.txt"]\n'
+                'sources_file = "sources.toml"\noutput = "out.txt"\ntimeout = 12\n'
+                "allow_private_sources = true\n[processing]\n"
+                'overlap_action = "remove_ranges"\n',
+                encoding="utf-8",
+            )
+            with mock.patch.dict(os.environ, {}, clear=True):
+                args = build_parser().parse_args(["--config-file", str(config)])
+                settings = resolve_runtime_settings(args)
+                self.assertEqual(settings["sources"], [str(root / "input.txt")])
+                self.assertEqual(settings["sources_file"], root / "sources.toml")
+                self.assertEqual(settings["output"], root / "out.txt")
+                self.assertEqual(settings["timeout"], 12)
+                self.assertEqual(settings["overlap_action"], "remove_ranges")
+                with mock.patch.dict(
+                    os.environ,
+                    {
+                        "HTTP_TIMEOUT": "20",
+                        "OVERLAP_ACTION": "",
+                        "SOURCE_URLS": "env.txt",
+                    },
+                ):
+                    args = build_parser().parse_args(
+                        [
+                            "--config-file",
+                            str(config),
+                            "--timeout",
+                            "30",
+                            "--source",
+                            "cli.txt",
+                            "--no-allow-private-sources",
+                        ]
+                    )
+                    settings = resolve_runtime_settings(args)
+                    self.assertEqual(settings["timeout"], 30)
+                    self.assertEqual(settings["sources"], ["cli.txt", "env.txt"])
+                    self.assertFalse(settings["allow_private_sources"])
+                    self.assertEqual(settings["overlap_action"], "remove_ranges")
+
+    def test_runtime_config_rejects_invalid_fields_even_when_overridden(self):
+        invalid = [
+            "version = true",
+            "version = 1\nunknown = 3",
+            "version = 1\n[runtime]\ntimout = 3",
+            "version = 1\n[runtime]\ntimeout = 0",
+            "version = 1\n[runtime]\ntimeout = true",
+            'version = 1\n[runtime]\nsources = "a.txt"',
+            "version = 1\n[runtime]\nmax_zip_compression_ratio = inf",
+            'version = 1\n[runtime]\nallow_private_sources = "true"',
+        ]
+        with tempfile.TemporaryDirectory() as folder:
+            config = Path(folder) / "config.toml"
+            for document in invalid:
+                with self.subTest(document=document):
+                    config.write_text(document, encoding="utf-8")
+                    with self.assertRaises(SourceError):
+                        load_runtime_config(config)
+
+    def test_invalid_environment_settings_fail_before_source_reads(self):
+        for key, value in [
+            ("HTTP_TIMEOUT", "bad"),
+            ("MAX_ZIP_MEMBERS", "0"),
+            ("MAX_ZIP_COMPRESSION_RATIO", "nan"),
+            ("ALLOW_PRIVATE_SOURCES", "maybe"),
+        ]:
+            with self.subTest(key=key):
+                with mock.patch.dict(os.environ, {key: value}, clear=True):
+                    args = build_parser().parse_args([])
+                    with self.assertRaises(SourceError):
+                        resolve_runtime_settings(args)
+
+    def test_compose_empty_overrides_preserve_config_choice(self):
+        compose = Path(__file__).with_name("docker-compose.yml").read_text()
+        self.assertIn('OVERLAP_ACTION: "${OVERLAP_ACTION:-}"', compose)
+        self.assertNotIn('OVERLAP_ACTION: "${OVERLAP_ACTION:-find}"', compose)
+        with tempfile.TemporaryDirectory() as folder:
+            config = Path(folder) / "config.toml"
+            config.write_text(
+                'version = 1\n[processing]\noverlap_action = "remove_single_ips"',
+                encoding="utf-8",
+            )
+            with mock.patch.dict(os.environ, {"OVERLAP_ACTION": ""}, clear=True):
+                settings = resolve_runtime_settings(
+                    build_parser().parse_args(["--config-file", str(config)])
+                )
+                self.assertEqual(settings["overlap_action"], "remove_single_ips")
+
     @staticmethod
     def resolution(address: str, port: int = 443):
         family = 10 if ":" in address else 2
