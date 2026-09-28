@@ -46,7 +46,7 @@ PROCESSING_SETTINGS = {
     "max_ipv4_removal_percent",
     "max_ipv6_removal_percent",
 }
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 IPAddress = ipaddress.IPv4Address | ipaddress.IPv6Address
 IPNetwork = ipaddress.IPv4Network | ipaddress.IPv6Network

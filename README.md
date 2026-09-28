@@ -252,6 +252,8 @@ ruff format --check .
 bandit --recursive -ll deny_ip_toolkit.py
 ```
 
-The project is currently at version `0.1.0`. See the
+The project is currently at version `0.2.0`. For fixed-version installation,
+verification, upgrades and rollback, see the [release guide](docs/RELEASES.md).
+See the
 [roadmap](ROADMAP.md), [changelog](CHANGELOG.md),
 [contribution guide](CONTRIBUTING.md), and [security policy](SECURITY.md).

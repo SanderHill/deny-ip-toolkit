@@ -43,4 +43,30 @@ jobs:
       - run: python -m pip install --requirement requirements-dev.txt
       - run: ruff check .
       - run: ruff format --check .
-      - run: bandit --recursive -ll deny_ip_toolkit.py output_formats.py
+      - run: bandit --recursive -ll deny_ip_toolkit.py output_formats.py scripts/build_release.py
+
+  release-package:
+    name: Release archive and installation smoke test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Build twice and verify fixed-version install
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/build_release.py --output-dir "$RUNNER_TEMP/dist"
+          python3 scripts/build_release.py --output-dir "$RUNNER_TEMP/repeat"
+          version=$(python3 deny_ip_toolkit.py --version | awk '{print $NF}')
+          cmp "$RUNNER_TEMP/dist/deny-ip-toolkit-$version.tar.gz" "$RUNNER_TEMP/repeat/deny-ip-toolkit-$version.tar.gz"
+          cd "$RUNNER_TEMP/dist"
+          sha256sum --check SHA256SUMS
+          mkdir "$RUNNER_TEMP/unpacked"
+          tar -xzf "deny-ip-toolkit-$version.tar.gz" -C "$RUNNER_TEMP/unpacked"
+          cd "$RUNNER_TEMP/unpacked/deny-ip-toolkit-$version"
+          python3 deny_ip_toolkit.py --version | grep -Fx "deny_ip_toolkit.py $version"
+          printf '192.0.2.1\n' > "$RUNNER_TEMP/example.txt"
+          python3 deny_ip_toolkit.py --source "$RUNNER_TEMP/example.txt" --output "$RUNNER_TEMP/result.txt"
+          cmp "$RUNNER_TEMP/example.txt" "$RUNNER_TEMP/result.txt"
