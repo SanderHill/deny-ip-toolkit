@@ -6,6 +6,8 @@ project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-09-28
+
 ### Added
 
 - Deterministic CSV, JSON, ipset, nftables and conservative Synology Auto Block
@@ -64,5 +66,6 @@ project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Synthetic unit tests, an MIT license, contribution guidance, and a security
   policy.
 
-[Unreleased]: https://github.com/SanderHill/deny-ip-toolkit/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/SanderHill/deny-ip-toolkit/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/SanderHill/deny-ip-toolkit/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/SanderHill/deny-ip-toolkit/releases/tag/v0.1.0

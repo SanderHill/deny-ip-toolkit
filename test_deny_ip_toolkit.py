@@ -493,7 +493,7 @@ class DenyIpToolkitTests(unittest.TestCase):
         return [(family, 1, 6, "", (address, port))]
 
     def test_version(self):
-        self.assertEqual(__version__, "0.1.0")
+        self.assertEqual(__version__, "0.2.0")
 
     def test_combines_sorts_and_deduplicates_local_sources(self):
         with tempfile.TemporaryDirectory() as folder:

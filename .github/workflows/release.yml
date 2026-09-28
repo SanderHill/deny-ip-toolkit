@@ -1,0 +1,167 @@
+name: Release
+
+on:
+  push:
+    tags: ["v[0-9]*"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  source:
+    name: Test and package tagged source
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Check tag, main ancestry, and release notes
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch origin main
+          git merge-base --is-ancestor HEAD origin/main
+          test "v$(python3 deny_ip_toolkit.py --version | awk '{print $NF}')" = "$GITHUB_REF_NAME"
+          test -f "docs/releases/$GITHUB_REF_NAME.md"
+      - name: Run tests and quality checks
+        run: |
+          python3 -m pip install --requirement requirements.txt --requirement requirements-dev.txt
+          python3 -m unittest -q
+          ruff check .
+          ruff format --check .
+          bandit --recursive -ll deny_ip_toolkit.py output_formats.py
+      - name: Build twice and verify reproducible archive
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/build_release.py --expected-version "${GITHUB_REF_NAME#v}" --output-dir "$RUNNER_TEMP/dist"
+          python3 scripts/build_release.py --expected-version "${GITHUB_REF_NAME#v}" --output-dir "$RUNNER_TEMP/repeat"
+          cmp "$RUNNER_TEMP/dist/deny-ip-toolkit-${GITHUB_REF_NAME#v}.tar.gz" "$RUNNER_TEMP/repeat/deny-ip-toolkit-${GITHUB_REF_NAME#v}.tar.gz"
+          cd "$RUNNER_TEMP/dist"
+          sha256sum --check SHA256SUMS
+          mkdir "$RUNNER_TEMP/unpacked"
+          tar -xzf "deny-ip-toolkit-${GITHUB_REF_NAME#v}.tar.gz" -C "$RUNNER_TEMP/unpacked"
+          cd "$RUNNER_TEMP/unpacked/deny-ip-toolkit-${GITHUB_REF_NAME#v}"
+          python3 deny_ip_toolkit.py --version
+          printf '192.0.2.1\n2001:db8::1\n' > "$RUNNER_TEMP/permitted-list.txt"
+          python3 deny_ip_toolkit.py --source "$RUNNER_TEMP/permitted-list.txt" --output "$RUNNER_TEMP/denylist.txt"
+          cmp "$RUNNER_TEMP/permitted-list.txt" "$RUNNER_TEMP/denylist.txt"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-source
+          path: |
+            ${{ runner.temp }}/dist/deny-ip-toolkit-*.tar.gz
+            ${{ runner.temp }}/dist/SHA256SUMS
+          if-no-files-found: error
+          retention-days: 7
+
+  container:
+    name: Build, smoke-test and publish multi-platform image
+    needs: source
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+    outputs:
+      digest: ${{ steps.publish.outputs.digest }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: docker/setup-qemu-action@v4
+      - uses: docker/setup-buildx-action@v4
+      - name: Smoke-test each supported architecture and non-root user
+        shell: bash
+        run: |
+          set -euo pipefail
+          for arch in amd64 arm64; do
+            docker buildx build --platform "linux/$arch" --load --tag "deny-ip-toolkit:smoke-$arch" .
+            test "$(docker run --rm --platform "linux/$arch" --entrypoint id "deny-ip-toolkit:smoke-$arch" -u)" != 0
+            docker run --rm --platform "linux/$arch" "deny-ip-toolkit:smoke-$arch" --version | grep -Fx "deny_ip_toolkit.py ${GITHUB_REF_NAME#v}"
+          done
+      - uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Refuse to overwrite the version tag
+        shell: bash
+        run: |
+          if docker manifest inspect "ghcr.io/sanderhill/deny-ip-toolkit:$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            echo 'The versioned container tag already exists; refusing to overwrite it.' >&2
+            exit 1
+          fi
+      - name: Publish amd64 and arm64 manifests
+        id: publish
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: |
+            ghcr.io/sanderhill/deny-ip-toolkit:${{ github.ref_name }}
+            ghcr.io/sanderhill/deny-ip-toolkit:latest
+          labels: |
+            org.opencontainers.image.source=https://github.com/SanderHill/deny-ip-toolkit
+            org.opencontainers.image.revision=${{ github.sha }}
+          provenance: mode=max
+          sbom: true
+      - name: Verify published manifest platforms
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker buildx imagetools inspect --raw "ghcr.io/sanderhill/deny-ip-toolkit@${{ steps.publish.outputs.digest }}" > "$RUNNER_TEMP/manifest.json"
+          jq -e '[.manifests[].platform | select(.os == "linux") | .architecture] | (index("amd64") != null and index("arm64") != null)' "$RUNNER_TEMP/manifest.json"
+      - uses: actions/attest@v4
+        with:
+          subject-name: ghcr.io/sanderhill/deny-ip-toolkit
+          subject-digest: ${{ steps.publish.outputs.digest }}
+          push-to-registry: true
+
+  publish:
+    name: Attest source and create GitHub release
+    needs: [source, container]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-source
+          path: dist
+      - name: Verify downloaded archive
+        run: cd dist && sha256sum --check SHA256SUMS
+      - uses: actions/attest@v4
+        with:
+          subject-path: dist/deny-ip-toolkit-*.tar.gz
+      - name: Publish immutable version release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          IMAGE_DIGEST: ${{ needs.container.outputs.digest }}
+        run: |
+          set -euo pipefail
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            echo 'Release already exists; refusing to overwrite it.' >&2
+            exit 1
+          fi
+          cp "docs/releases/$GITHUB_REF_NAME.md" "$RUNNER_TEMP/release-notes.md"
+          printf '\nContainer digest: `ghcr.io/sanderhill/deny-ip-toolkit@%s`\n' "$IMAGE_DIGEST" >> "$RUNNER_TEMP/release-notes.md"
+          gh release create "$GITHUB_REF_NAME" dist/deny-ip-toolkit-*.tar.gz dist/SHA256SUMS \
+            --verify-tag --title "Deny IP Toolkit ${GITHUB_REF_NAME#v}" \
+            --notes-file "$RUNNER_TEMP/release-notes.md" --latest

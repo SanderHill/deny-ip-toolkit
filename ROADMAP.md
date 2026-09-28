@@ -26,7 +26,7 @@ risk reduction and user value, not by promised delivery dates.
 
 - [x] Add continuous integration across supported Python versions.
 - [x] Add static analysis, dependency updates, and security scanning.
-- Publish versioned container images and reproducible release artifacts.
+- [x] Publish versioned container images and reproducible release artifacts.
 - Add conditional downloads using ETag and Last-Modified metadata.
 
 Ideas and contributions are welcome through
