@@ -16,11 +16,11 @@ jobs:
     name: Test and package tagged source
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
           persist-credentials: false
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.13"
       - name: Check tag, main ancestry, and release notes
@@ -54,7 +54,7 @@ jobs:
           printf '192.0.2.1\n2001:db8::1\n' > "$RUNNER_TEMP/permitted-list.txt"
           python3 deny_ip_toolkit.py --source "$RUNNER_TEMP/permitted-list.txt" --output "$RUNNER_TEMP/denylist.txt"
           cmp "$RUNNER_TEMP/permitted-list.txt" "$RUNNER_TEMP/denylist.txt"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: release-source
           path: |
@@ -75,7 +75,7 @@ jobs:
     outputs:
       digest: ${{ steps.publish.outputs.digest }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           persist-credentials: false
       - uses: docker/setup-qemu-action@v4
@@ -137,10 +137,10 @@ jobs:
       id-token: write
       attestations: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           persist-credentials: false
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: release-source
           path: dist
